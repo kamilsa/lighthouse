@@ -2,14 +2,14 @@ use crate::fetch_blobs::{EngineGetBlobsOutput, FetchEngineBlobError};
 use crate::observed_data_sidecars::ObservationKey;
 use crate::partial_data_column_assembler::PartialDataColumnAssembler;
 use crate::{AvailabilityProcessingStatus, BeaconChain, BeaconChainTypes};
-use execution_layer::json_structures::{BlobAndProofV1, BlobAndProofV2, BlobAndProofV3};
+use execution_layer::json_structures::{BlobAndProofV1, BlobAndProofV2, BlobAndProofV3, JsonBlobCellsAndProofsV1};
 use kzg::Kzg;
 #[cfg(test)]
 use mockall::automock;
 use std::collections::HashSet;
 use std::sync::Arc;
 use task_executor::TaskExecutor;
-use types::{ChainSpec, ColumnIndex, Hash256, Slot};
+use types::{ChainSpec, ColumnIndex, ExecutionBlockHash, ExecPayload, Hash256, Slot};
 
 /// An adapter to the `BeaconChain` functionalities to remove `BeaconChain` from direct dependency to enable testing fetch blobs logic.
 pub(crate) struct FetchBlobsBeaconAdapter<T: BeaconChainTypes> {
@@ -156,5 +156,55 @@ impl<T: BeaconChainTypes> FetchBlobsBeaconAdapter<T> {
             .await
             .map_err(FetchEngineBlobError::RequestFailed)
             .map(|caps| caps.get_blobs_v3)
+    }
+
+    pub(crate) async fn supports_get_blobs_v4(&self) -> Result<bool, FetchEngineBlobError> {
+        let execution_layer = self
+            .chain
+            .execution_layer
+            .as_ref()
+            .ok_or(FetchEngineBlobError::ExecutionLayerMissing)?;
+
+        execution_layer
+            .get_engine_capabilities(None)
+            .await
+            .map_err(FetchEngineBlobError::RequestFailed)
+            .map(|caps| caps.get_blobs_v4)
+    }
+
+    pub(crate) async fn get_blobs_v4(
+        &self,
+        block_hash: ExecutionBlockHash,
+        cell_index_bitarray: [u8; 16],
+    ) -> Result<Option<Vec<JsonBlobCellsAndProofsV1<T::EthSpec>>>, FetchEngineBlobError> {
+        let execution_layer = self
+            .chain
+            .execution_layer
+            .as_ref()
+            .ok_or(FetchEngineBlobError::ExecutionLayerMissing)?;
+
+        execution_layer
+            .get_blobs_v4(block_hash, cell_index_bitarray)
+            .await
+            .map_err(FetchEngineBlobError::RequestFailed)
+    }
+
+    pub(crate) fn get_execution_block_hash(
+        &self,
+        block_root: &Hash256,
+    ) -> Result<Option<ExecutionBlockHash>, FetchEngineBlobError> {
+        let blinded_block = self
+            .chain
+            .store
+            .get_blinded_block(block_root)
+            .map_err(|e| FetchEngineBlobError::BeaconChainError(Box::new(e.into())))?;
+
+        Ok(blinded_block.and_then(|block| {
+            block
+                .message()
+                .execution_payload()
+                .ok()
+                .map(|ep| ep.block_hash())
+        }))
     }
 }

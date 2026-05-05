@@ -895,6 +895,18 @@ pub struct BlobAndProof<E: EthSpec> {
 /// A BlobAndProofV3 is just a BlobAndProofV2 that may also be `null` if unknown by the EL.
 pub type BlobAndProofV3<E> = Option<BlobAndProofV2<E>>;
 
+/// Response type for `engine_getBlobsV4`.
+///
+/// Contains cells and proofs for a single blob, filtered by the requested cell indices.
+/// The arrays are dense: one entry per set bit in `cellIndexBitarray`, in increasing cell index order.
+/// Null entries indicate the cell/proof was not available from the EL.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(bound = "E: EthSpec", rename_all = "camelCase")]
+pub struct JsonBlobCellsAndProofsV1<E: EthSpec> {
+    pub blob_cells: Vec<Option<FixedVector<u8, E::BytesPerCell>>>,
+    pub proofs: Vec<Option<KzgProof>>,
+}
+
 #[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct JsonForkchoiceStateV1 {
@@ -937,6 +949,17 @@ impl From<JsonForkchoiceStateV1> for ForkchoiceState {
             finalized_block_hash,
         }
     }
+}
+
+/// Forkchoice state for `engine_forkchoiceUpdatedV4`, which includes custody columns.
+#[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JsonForkchoiceStateV4 {
+    pub head_block_hash: ExecutionBlockHash,
+    pub safe_block_hash: ExecutionBlockHash,
+    pub finalized_block_hash: ExecutionBlockHash,
+    #[serde(with = "serde_bytes_16_hex")]
+    pub custody_columns: [u8; 16],
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, EnumString)]
@@ -1119,6 +1142,50 @@ pub mod serde_logs_bloom {
         FixedVector::new(vec)
             .map_err(|e| serde::de::Error::custom(format!("invalid logs bloom: {:?}", e)))
     }
+}
+
+/// Serializes and deserializes `[u8; 16]` as a hex string (e.g., `"0x0011..."`).
+pub mod serde_bytes_16_hex {
+    use super::*;
+    use serde::{Deserializer, Serializer};
+    use serde_utils::hex::PrefixedHexVisitor;
+
+    pub fn serialize<S>(bytes: &[u8; 16], serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&format!("0x{}", hex::encode(bytes)))
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<[u8; 16], D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let vec = deserializer.deserialize_string(PrefixedHexVisitor)?;
+        if vec.len() != 16 {
+            return Err(serde::de::Error::custom(format!(
+                "expected 16 bytes, got {}",
+                vec.len()
+            )));
+        }
+        let mut arr = [0u8; 16];
+        arr.copy_from_slice(&vec);
+        Ok(arr)
+    }
+}
+
+/// Convert custody column indices to a 128-bit bitarray (16 bytes).
+/// Each bit corresponds to a cell index (= column index in PeerDAS).
+/// Bit i is set if column index i is in the custody set.
+pub fn custody_columns_to_bitarray(column_indices: &[u64]) -> [u8; 16] {
+    let mut bitarray = [0u8; 16];
+    for &col in column_indices {
+        let col = col as usize;
+        if col < 128 {
+            bitarray[col / 8] |= 1 << (col % 8);
+        }
+    }
+    bitarray
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

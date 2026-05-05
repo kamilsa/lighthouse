@@ -523,12 +523,44 @@ pub async fn handle_rpc<E: EthSpec>(
             let response: Option<Vec<BlobAndProofV2<E>>> = results.into_iter().collect();
             Ok(serde_json::to_value(response).unwrap())
         }
+        ENGINE_GET_BLOBS_V3 => {
+            let versioned_hashes =
+                get_param::<Vec<Hash256>>(params, 0).map_err(|s| (s, BAD_PARAMS_ERROR_CODE))?;
+            let generator = ctx.execution_block_generator.read();
+            // V3: per-element nullable array, similar to V1 but with PeerDAS proofs.
+            let response: Vec<Option<BlobAndProofV2<E>>> = versioned_hashes
+                .iter()
+                .map(|hash| match generator.get_blob_and_proof(hash) {
+                    Some(BlobAndProof::V2(v2)) => Some(v2),
+                    _ => None,
+                })
+                .collect();
+            Ok(serde_json::to_value(Some(response)).unwrap())
+        }
+        ENGINE_GET_BLOBS_V4 => {
+            let _block_hash: ExecutionBlockHash =
+                get_param(params, 0).map_err(|s| (s, BAD_PARAMS_ERROR_CODE))?;
+            let _cell_index_bitarray: String =
+                get_param(params, 1).map_err(|s| (s, BAD_PARAMS_ERROR_CODE))?;
+            // V4: returns cells and proofs for requested cell indices.
+            // For now, return None (no blobs available) as the mock doesn't store cells.
+            Ok(serde_json::to_value(Option::<Vec<JsonBlobCellsAndProofsV1<E>>>::None).unwrap())
+        }
         ENGINE_FORKCHOICE_UPDATED_V1
         | ENGINE_FORKCHOICE_UPDATED_V2
         | ENGINE_FORKCHOICE_UPDATED_V3
         | ENGINE_FORKCHOICE_UPDATED_V4 => {
-            let forkchoice_state: JsonForkchoiceStateV1 =
-                get_param(params, 0).map_err(|s| (s, BAD_PARAMS_ERROR_CODE))?;
+            let forkchoice_state: JsonForkchoiceStateV1 = if method == ENGINE_FORKCHOICE_UPDATED_V4 {
+                let v4_state: JsonForkchoiceStateV4 =
+                    get_param(params, 0).map_err(|s| (s, BAD_PARAMS_ERROR_CODE))?;
+                JsonForkchoiceStateV1 {
+                    head_block_hash: v4_state.head_block_hash,
+                    safe_block_hash: v4_state.safe_block_hash,
+                    finalized_block_hash: v4_state.finalized_block_hash,
+                }
+            } else {
+                get_param(params, 0).map_err(|s| (s, BAD_PARAMS_ERROR_CODE))?
+            };
             let payload_attributes = match method {
                 ENGINE_FORKCHOICE_UPDATED_V1 => {
                     let jpa1: Option<JsonPayloadAttributesV1> =

@@ -6500,6 +6500,16 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
                 return Ok(());
             };
 
+        // Compute custody columns bitarray for forkchoiceUpdatedV4.
+        let custody_columns_bitarray = {
+            let epoch = current_slot.epoch(T::EthSpec::slots_per_epoch());
+            let custody_columns = self
+                .data_availability_checker
+                .custody_context()
+                .custody_columns_for_epoch(Some(epoch), &self.spec);
+            Some(execution_layer::json_structures::custody_columns_to_bitarray(custody_columns))
+        };
+
         let forkchoice_updated_response = execution_layer
             .notify_forkchoice_updated(
                 head_hash,
@@ -6508,6 +6518,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
                 current_slot,
                 head_block_root,
                 head_payload_status,
+                custody_columns_bitarray,
             )
             .await
             .map_err(Error::ExecutionForkChoiceUpdateFailed);

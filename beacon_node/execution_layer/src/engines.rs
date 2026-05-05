@@ -165,10 +165,11 @@ impl Engine {
         &self,
         forkchoice_state: ForkchoiceState,
         payload_attributes: Option<PayloadAttributes>,
+        custody_columns: Option<[u8; 16]>,
     ) -> Result<ForkchoiceUpdatedResponse, EngineApiError> {
         let response = self
             .api
-            .forkchoice_updated(forkchoice_state, payload_attributes.clone())
+            .forkchoice_updated(forkchoice_state, payload_attributes.clone(), custody_columns)
             .await?;
 
         if let Some(payload_id) = response.payload_id {
@@ -208,7 +209,7 @@ impl Engine {
 
             // For simplicity, payload attributes are never included in this call. It may be
             // reasonable to include them in the future.
-            if let Err(e) = self.api.forkchoice_updated(forkchoice_state, None).await {
+            if let Err(e) = self.api.forkchoice_updated(forkchoice_state, None, None).await {
                 debug!(
                     error = ?e,
                     "Failed to issue latest head to engine"

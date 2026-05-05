@@ -4,7 +4,7 @@
 //! This crate only provides useful functionality for "The Merge", it does not provide any of the
 //! deposit-contract functionality that the `beacon_node/eth1` crate already provides.
 
-use crate::json_structures::{BlobAndProofV1, BlobAndProofV2, BlobAndProofV3};
+use crate::json_structures::{BlobAndProofV1, BlobAndProofV2, BlobAndProofV3, JsonBlobCellsAndProofsV1};
 use crate::payload_cache::PayloadCache;
 use arc_swap::ArcSwapOption;
 use auth::{Auth, JwtKey, strip_prefix};
@@ -1339,6 +1339,7 @@ impl<E: EthSpec> ExecutionLayer<E> {
                         .notify_forkchoice_updated(
                             fork_choice_state,
                             Some(payload_attributes.clone()),
+                            None,
                         )
                         .await?;
 
@@ -1526,6 +1527,7 @@ impl<E: EthSpec> ExecutionLayer<E> {
         current_slot: Slot,
         head_block_root: Hash256,
         head_payload_status: fork_choice::PayloadStatus,
+        custody_columns: Option<[u8; 16]>,
     ) -> Result<PayloadStatus, Error> {
         let _timer = metrics::start_timer_vec(
             &metrics::EXECUTION_LAYER_REQUEST_TIMES,
@@ -1575,7 +1577,7 @@ impl<E: EthSpec> ExecutionLayer<E> {
             .engine()
             .request(|engine| async move {
                 engine
-                    .notify_forkchoice_updated(forkchoice_state, payload_attributes)
+                    .notify_forkchoice_updated(forkchoice_state, payload_attributes, custody_columns)
                     .await
             })
             .await;
@@ -1760,6 +1762,26 @@ impl<E: EthSpec> ExecutionLayer<E> {
         if capabilities.get_blobs_v3 {
             self.engine()
                 .request(|engine| async move { engine.api.get_blobs_v3(query).await })
+                .await
+                .map_err(Box::new)
+                .map_err(Error::EngineError)
+        } else {
+            Err(Error::GetBlobsNotSupported)
+        }
+    }
+
+    pub async fn get_blobs_v4(
+        &self,
+        block_hash: ExecutionBlockHash,
+        cell_index_bitarray: [u8; 16],
+    ) -> Result<Option<Vec<JsonBlobCellsAndProofsV1<E>>>, Error> {
+        let capabilities = self.get_engine_capabilities(None).await?;
+
+        if capabilities.get_blobs_v4 {
+            self.engine()
+                .request(|engine| async move {
+                    engine.api.get_blobs_v4(block_hash, cell_index_bitarray).await
+                })
                 .await
                 .map_err(Box::new)
                 .map_err(Error::EngineError)
