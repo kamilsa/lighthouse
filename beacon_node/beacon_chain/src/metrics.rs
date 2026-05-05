@@ -1860,6 +1860,40 @@ pub static BEACON_ENGINE_GET_BLOBS_V3_REQUEST_DURATION_SECONDS: LazyLock<Result<
         )
     });
 
+pub static BEACON_ENGINE_GET_BLOBS_V4_REQUESTS_TOTAL: LazyLock<Result<IntCounter>> =
+    LazyLock::new(|| {
+        try_create_int_counter(
+            "beacon_engine_getBlobsV4_requests_total",
+            "Total number of engine_getBlobsV4 requests made to the execution layer",
+        )
+    });
+
+pub static BEACON_ENGINE_GET_BLOBS_V4_COMPLETE_RESPONSES_TOTAL: LazyLock<Result<IntCounter>> =
+    LazyLock::new(|| {
+        try_create_int_counter(
+            "beacon_engine_getBlobsV4_complete_responses_total",
+            "Total number of successful engine_getBlobsV4 responses from the execution layer \
+            with all blobs",
+        )
+    });
+
+pub static BEACON_ENGINE_GET_BLOBS_V4_PARTIAL_RESPONSES_TOTAL: LazyLock<Result<IntCounter>> =
+    LazyLock::new(|| {
+        try_create_int_counter(
+            "beacon_engine_getBlobsV4_partial_responses_total",
+            "Total number of successful engine_getBlobsV4 responses from the execution layer \
+            with at least one blob missing",
+        )
+    });
+
+pub static BEACON_ENGINE_GET_BLOBS_V4_REQUEST_DURATION_SECONDS: LazyLock<Result<Histogram>> =
+    LazyLock::new(|| {
+        try_create_histogram(
+            "beacon_engine_getBlobsV4_request_duration_seconds",
+            "Duration of engine_getBlobsV4 requests to the execution layer in seconds",
+        )
+    });
+
 /*
  * Standardized metrics for partial column efficiency
  */

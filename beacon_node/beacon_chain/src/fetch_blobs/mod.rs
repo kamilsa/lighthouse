@@ -526,8 +526,8 @@ async fn fetch_and_process_blobs_v4<T: BeaconChainTypes>(
     }
 
     metrics::observe(&metrics::BLOBS_FROM_EL_EXPECTED, num_expected_blobs as f64);
-    inc_counter(&metrics::BEACON_ENGINE_GET_BLOBS_V3_REQUESTS_TOTAL);
-    let _timer = metrics::start_timer(&metrics::BEACON_ENGINE_GET_BLOBS_V3_REQUEST_DURATION_SECONDS);
+    inc_counter(&metrics::BEACON_ENGINE_GET_BLOBS_V4_REQUESTS_TOTAL);
+    let _timer = metrics::start_timer(&metrics::BEACON_ENGINE_GET_BLOBS_V4_REQUEST_DURATION_SECONDS);
 
     let cell_index_bitarray = custody_columns_to_bitarray(custody_columns_indices);
 
@@ -564,11 +564,11 @@ async fn fetch_and_process_blobs_v4<T: BeaconChainTypes>(
             num_fetched,
             num_expected_blobs, "Partial cells received from the EL (V4)"
         );
-        inc_counter(&metrics::BEACON_ENGINE_GET_BLOBS_V3_PARTIAL_RESPONSES_TOTAL);
+        inc_counter(&metrics::BEACON_ENGINE_GET_BLOBS_V4_PARTIAL_RESPONSES_TOTAL);
     } else {
         debug!(num_fetched, "All cell blobs received from the EL (V4)");
         inc_counter(&metrics::BLOBS_FROM_EL_HIT_TOTAL);
-        inc_counter(&metrics::BEACON_ENGINE_GET_BLOBS_V3_COMPLETE_RESPONSES_TOTAL);
+        inc_counter(&metrics::BEACON_ENGINE_GET_BLOBS_V4_COMPLETE_RESPONSES_TOTAL);
     }
 
     if chain_adapter.fork_choice_contains_block(&block_root) {
