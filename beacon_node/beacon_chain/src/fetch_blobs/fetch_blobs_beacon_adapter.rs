@@ -9,7 +9,7 @@ use mockall::automock;
 use std::collections::HashSet;
 use std::sync::Arc;
 use task_executor::TaskExecutor;
-use types::{ChainSpec, ColumnIndex, ExecutionBlockHash, ExecPayload, Hash256, Slot};
+use types::{ChainSpec, ColumnIndex, Hash256, Slot, VersionedHash};
 
 /// An adapter to the `BeaconChain` functionalities to remove `BeaconChain` from direct dependency to enable testing fetch blobs logic.
 pub(crate) struct FetchBlobsBeaconAdapter<T: BeaconChainTypes> {
@@ -174,9 +174,9 @@ impl<T: BeaconChainTypes> FetchBlobsBeaconAdapter<T> {
 
     pub(crate) async fn get_blobs_v4(
         &self,
-        block_hash: ExecutionBlockHash,
+        versioned_hashes: Vec<VersionedHash>,
         cell_index_bitarray: [u8; 16],
-    ) -> Result<Option<Vec<JsonBlobCellsAndProofsV1<T::EthSpec>>>, FetchEngineBlobError> {
+    ) -> Result<Option<Vec<Option<JsonBlobCellsAndProofsV1<T::EthSpec>>>>, FetchEngineBlobError> {
         let execution_layer = self
             .chain
             .execution_layer
@@ -184,27 +184,8 @@ impl<T: BeaconChainTypes> FetchBlobsBeaconAdapter<T> {
             .ok_or(FetchEngineBlobError::ExecutionLayerMissing)?;
 
         execution_layer
-            .get_blobs_v4(block_hash, cell_index_bitarray)
+            .get_blobs_v4(versioned_hashes, cell_index_bitarray)
             .await
             .map_err(FetchEngineBlobError::RequestFailed)
-    }
-
-    pub(crate) fn get_execution_block_hash(
-        &self,
-        block_root: &Hash256,
-    ) -> Result<Option<ExecutionBlockHash>, FetchEngineBlobError> {
-        let blinded_block = self
-            .chain
-            .store
-            .get_blinded_block(block_root)
-            .map_err(|e| FetchEngineBlobError::BeaconChainError(Box::new(e.into())))?;
-
-        Ok(blinded_block.and_then(|block| {
-            block
-                .message()
-                .execution_payload()
-                .ok()
-                .map(|ep| ep.block_hash())
-        }))
     }
 }

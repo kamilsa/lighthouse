@@ -901,7 +901,7 @@ pub type BlobAndProofV3<E> = Option<BlobAndProofV2<E>>;
 /// The arrays are dense: one entry per set bit in `cellIndexBitarray`, in increasing cell index order.
 /// Null entries indicate the cell/proof was not available from the EL.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(bound = "E: EthSpec", rename_all = "camelCase")]
+#[serde(bound = "E: EthSpec")]
 pub struct JsonBlobCellsAndProofsV1<E: EthSpec> {
     pub blob_cells: Vec<Option<FixedVector<u8, E::BytesPerCell>>>,
     pub proofs: Vec<Option<KzgProof>>,

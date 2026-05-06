@@ -1772,15 +1772,15 @@ impl<E: EthSpec> ExecutionLayer<E> {
 
     pub async fn get_blobs_v4(
         &self,
-        block_hash: ExecutionBlockHash,
+        versioned_hashes: Vec<Hash256>,
         cell_index_bitarray: [u8; 16],
-    ) -> Result<Option<Vec<JsonBlobCellsAndProofsV1<E>>>, Error> {
+    ) -> Result<Option<Vec<Option<JsonBlobCellsAndProofsV1<E>>>>, Error> {
         let capabilities = self.get_engine_capabilities(None).await?;
 
         if capabilities.get_blobs_v4 {
             self.engine()
                 .request(|engine| async move {
-                    engine.api.get_blobs_v4(block_hash, cell_index_bitarray).await
+                    engine.api.get_blobs_v4(versioned_hashes, cell_index_bitarray).await
                 })
                 .await
                 .map_err(Box::new)

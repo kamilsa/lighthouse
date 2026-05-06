@@ -25,7 +25,10 @@ use crate::{
     metrics,
 };
 use execution_layer::Error as ExecutionLayerError;
-use execution_layer::json_structures::{BlobAndProofV1, BlobAndProofV2, BlobAndProofV3, JsonBlobCellsAndProofsV1, custody_columns_to_bitarray};
+use execution_layer::json_structures::{
+    BlobAndProofV1, BlobAndProofV2, BlobAndProofV3, JsonBlobCellsAndProofsV1,
+    custody_columns_to_bitarray,
+};
 use metrics::{TryExt, inc_counter};
 #[cfg(test)]
 use mockall_double::double;
@@ -33,8 +36,11 @@ use slot_clock::timestamp_now;
 use state_processing::per_block_processing::deneb::kzg_commitment_to_versioned_hash;
 use std::sync::Arc;
 use tracing::{debug, instrument, warn};
-use types::data::{BlobSidecarError, ColumnIndex, DataColumnSidecarError, PartialDataColumnHeader};
-use types::{BeaconStateError, BlobSidecar, EthSpec, ExecutionBlockHash, Hash256, KzgProof, VersionedHash};
+use types::data::{
+    BlobSidecarError, Cell, CellBitmap, ColumnIndex, DataColumnSidecarError, PartialDataColumn,
+    PartialDataColumnSidecar, PartialDataColumnHeader,
+};
+use types::{BeaconStateError, BlobSidecar, EthSpec, Hash256, KzgProof, VersionedHash};
 
 /// Result from engine get blobs to be passed onto `DataAvailabilityChecker` and published to the
 /// gossip network. The blobs / data columns have not been marked as observed yet, as they may not
@@ -113,17 +119,15 @@ async fn fetch_and_process_engine_blobs_inner<T: BeaconChainTypes>(
         // Try V4 first if the EL supports it — fetches only custody cells instead of full blobs.
         let supports_v4 = chain_adapter.supports_get_blobs_v4().await?;
         if supports_v4 {
-            if let Some(exec_block_hash) = chain_adapter.get_execution_block_hash(&block_root)? {
-                return fetch_and_process_blobs_v4(
-                    chain_adapter,
-                    block_root,
-                    header,
-                    exec_block_hash,
-                    custody_columns,
-                    publish_fn,
-                )
-                .await;
-            }
+            return fetch_and_process_blobs_v4(
+                chain_adapter,
+                block_root,
+                header,
+                versioned_hashes,
+                custody_columns,
+                publish_fn,
+            )
+            .await;
         }
         fetch_and_process_blobs_v2_or_v3(
             chain_adapter,
@@ -513,7 +517,7 @@ async fn fetch_and_process_blobs_v4<T: BeaconChainTypes>(
     chain_adapter: FetchBlobsBeaconAdapter<T>,
     block_root: Hash256,
     header: Arc<PartialDataColumnHeader<T::EthSpec>>,
-    exec_block_hash: ExecutionBlockHash,
+    versioned_hashes: Vec<VersionedHash>,
     custody_columns_indices: &[ColumnIndex],
     publish_fn: impl Fn(EngineGetBlobsOutput<T>) + Send + 'static,
 ) -> Result<Option<AvailabilityProcessingStatus>, FetchEngineBlobError> {
@@ -538,7 +542,7 @@ async fn fetch_and_process_blobs_v4<T: BeaconChainTypes>(
     );
 
     let response = chain_adapter
-        .get_blobs_v4(exec_block_hash, cell_index_bitarray)
+        .get_blobs_v4(versioned_hashes, cell_index_bitarray)
         .await
         .inspect_err(|_| {
             inc_counter(&metrics::BLOBS_FROM_EL_ERROR_TOTAL);
@@ -637,23 +641,20 @@ async fn compute_custody_columns_from_cells<T: BeaconChainTypes>(
     chain_adapter: &Arc<FetchBlobsBeaconAdapter<T>>,
     block_root: Hash256,
     header: &PartialDataColumnHeader<T::EthSpec>,
-    blobs_cells_and_proofs: Vec<JsonBlobCellsAndProofsV1<T::EthSpec>>,
+    blobs_cells_and_proofs: Vec<Option<JsonBlobCellsAndProofsV1<T::EthSpec>>>,
     custody_columns_indices: &[ColumnIndex],
 ) -> Result<Vec<KzgVerifiedCustodyPartialDataColumn<T::EthSpec>>, FetchEngineBlobError> {
     let spec = chain_adapter.spec().clone();
     let chain_adapter_cloned = chain_adapter.clone();
     let custody_columns_indices = custody_columns_indices.to_vec();
     let header = header.clone();
-    let bitarray = custody_columns_to_bitarray(&custody_columns_indices);
+    let num_expected_blobs = blobs_cells_and_proofs.len();
 
     chain_adapter
         .executor()
         .spawn_blocking_handle(
             move || {
-                use types::data::{Cell, DataColumn};
                 use ssz_types::VariableList;
-
-                let mut columns: Vec<KzgVerifiedCustodyPartialDataColumn<T::EthSpec>> = Vec::new();
 
                 // Check which columns are already known
                 let observation_key =
@@ -663,15 +664,9 @@ async fn compute_custody_columns_from_cells<T: BeaconChainTypes>(
                     .data_column_known_for_observation_key(observation_key);
                 let known_columns = chain_adapter_cloned.cached_data_column_indexes(&block_root);
 
-                // Pre-compute dense index mapping: for each column index, what is its position
-                // in the dense array (position among set bits).
-                let dense_index_map: Vec<(ColumnIndex, usize)> = custody_columns_indices
-                    .iter()
-                    .enumerate()
-                    .map(|(dense_idx, &col_idx)| (col_idx, dense_idx))
-                    .collect();
+                let mut custody_columns = vec![];
 
-                for (col_idx, dense_idx) in dense_index_map {
+                for (dense_idx, &col_idx) in custody_columns_indices.iter().enumerate() {
                     // Skip if already observed on gossip
                     if let Some(ref observed) = observed_columns {
                         if observed.contains(&col_idx) {
@@ -690,22 +685,38 @@ async fn compute_custody_columns_from_cells<T: BeaconChainTypes>(
                     // indexed by position among set bits in cellIndexBitarray.
                     let mut column_cells: Vec<Cell<T::EthSpec>> = Vec::new();
                     let mut column_proofs: Vec<KzgProof> = Vec::new();
-                    let mut num_present = 0usize;
+                    let mut cells_present_bitmap =
+                        CellBitmap::<T::EthSpec>::with_capacity(num_expected_blobs)
+                            .map_err(|e| FetchEngineBlobError::InternalError(format!(
+                                "Failed to create V4 cells_present_bitmap: {:?}",
+                                e
+                            )))?;
 
-                    for blob_cells in &blobs_cells_and_proofs {
+                    for (blob_index, maybe_blob_cells) in blobs_cells_and_proofs.iter().enumerate() {
+                        let Some(blob_cells) = maybe_blob_cells else {
+                            continue;
+                        };
+
                         let cell = blob_cells.blob_cells.get(dense_idx).and_then(|c| c.as_ref());
                         let proof = blob_cells.proofs.get(dense_idx).and_then(|p| p.as_ref());
 
                         match (cell, proof) {
                             (Some(cell), Some(proof)) => {
+                                cells_present_bitmap.set(blob_index, true).map_err(|e| {
+                                    FetchEngineBlobError::InternalError(format!(
+                                        "Failed to set V4 cells_present_bitmap: {:?}",
+                                        e
+                                    ))
+                                })?;
                                 column_cells.push(cell.clone());
                                 column_proofs.push(*proof);
-                                num_present += 1;
                             }
+                            (None, None) => {}
                             _ => {
-                                // Cell or proof not available for this blob — push placeholder.
-                                // A full column requires cells for ALL blobs, so this column will
-                                // remain partial.
+                                return Err(FetchEngineBlobError::InternalError(format!(
+                                    "Mismatched V4 cell/proof availability for column {} blob {}",
+                                    col_idx, blob_index
+                                )));
                             }
                         }
                     }
@@ -714,40 +725,44 @@ async fn compute_custody_columns_from_cells<T: BeaconChainTypes>(
                         continue;
                     }
 
-                    let column: DataColumn<T::EthSpec> = VariableList::try_from(column_cells)
-                        .map_err(|e| {
+                    let column: VariableList<Cell<T::EthSpec>, <T::EthSpec as EthSpec>::MaxBlobCommitmentsPerBlock> =
+                        VariableList::try_from(column_cells).map_err(|e| {
                             FetchEngineBlobError::InternalError(format!(
-                                "Failed to create column: {:?}",
+                                "Failed to create V4 partial column cells: {:?}",
                                 e
                             ))
                         })?;
-                    let proofs: VariableList<KzgProof, <T::EthSpec as EthSpec>::MaxBlobCommitmentsPerBlock> = VariableList::try_from(column_proofs).map_err(|e| {
-                        FetchEngineBlobError::InternalError(format!(
-                            "Failed to create proofs: {:?}",
-                            e
-                        ))
-                    })?;
+                    let kzg_proofs: VariableList<KzgProof, <T::EthSpec as EthSpec>::MaxBlobCommitmentsPerBlock> =
+                        VariableList::try_from(column_proofs).map_err(|e| {
+                            FetchEngineBlobError::InternalError(format!(
+                                "Failed to create V4 partial column proofs: {:?}",
+                                e
+                            ))
+                        })?;
 
-                    // TODO: Construct PartialDataColumnSidecar from cells and proofs.
-                    // This requires implementing construction logic that builds a sidecar
-                    // directly from pre-computed cells rather than from full blobs.
-                    // The sidecar needs to track which cells are present via CellBitmap.
-                    let _ = (column, proofs, num_present, bitarray);
+                    let partial = PartialDataColumn {
+                        block_root,
+                        index: col_idx,
+                        sidecar: PartialDataColumnSidecar {
+                            cells_present_bitmap,
+                            column,
+                            kzg_proofs,
+                            header: Some(header.clone()).into(),
+                        },
+                    };
+
+                    custody_columns.push(
+                        KzgVerifiedCustodyPartialDataColumn::from_asserted_custody(
+                            KzgVerifiedPartialDataColumn::from_execution_verified(Arc::new(partial)),
+                        ),
+                    );
                 }
 
-                Ok(columns)
+                Ok(custody_columns)
             },
             "compute_custody_columns_from_cells_v4",
         )
         .ok_or(FetchEngineBlobError::RuntimeShutdown)?
         .await
         .map_err(FetchEngineBlobError::TokioJoin)?
-}
-
-/// Get bit at position `i` from a 16-byte (128-bit) bitarray.
-fn bitarray_get(bitarray: &[u8; 16], i: usize) -> bool {
-    if i >= 128 {
-        return false;
-    }
-    (bitarray[i / 8] >> (i % 8)) & 1 == 1
 }

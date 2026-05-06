@@ -538,13 +538,13 @@ pub async fn handle_rpc<E: EthSpec>(
             Ok(serde_json::to_value(Some(response)).unwrap())
         }
         ENGINE_GET_BLOBS_V4 => {
-            let _block_hash: ExecutionBlockHash =
+            let _versioned_hashes: Vec<Hash256> =
                 get_param(params, 0).map_err(|s| (s, BAD_PARAMS_ERROR_CODE))?;
             let _cell_index_bitarray: String =
                 get_param(params, 1).map_err(|s| (s, BAD_PARAMS_ERROR_CODE))?;
             // V4: returns cells and proofs for requested cell indices.
             // For now, return None (no blobs available) as the mock doesn't store cells.
-            Ok(serde_json::to_value(Option::<Vec<JsonBlobCellsAndProofsV1<E>>>::None).unwrap())
+            Ok(serde_json::to_value(Option::<Vec<Option<JsonBlobCellsAndProofsV1<E>>>>::None).unwrap())
         }
         ENGINE_FORKCHOICE_UPDATED_V1
         | ENGINE_FORKCHOICE_UPDATED_V2

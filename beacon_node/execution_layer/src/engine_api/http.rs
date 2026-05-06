@@ -11,6 +11,7 @@ use serde_json::json;
 use std::collections::HashSet;
 use std::sync::LazyLock;
 use tokio::sync::Mutex;
+use tracing::debug;
 
 use std::time::{Duration, Instant};
 
@@ -763,13 +764,18 @@ impl HttpJsonRpc {
 
     pub async fn get_blobs_v4<E: EthSpec>(
         &self,
-        block_hash: ExecutionBlockHash,
+        versioned_hashes: Vec<Hash256>,
         cell_index_bitarray: [u8; 16],
-    ) -> Result<Option<Vec<JsonBlobCellsAndProofsV1<E>>>, Error> {
-        let params = json!([
-            block_hash,
-            format!("0x{}", hex::encode(cell_index_bitarray))
-        ]);
+    ) -> Result<Option<Vec<Option<JsonBlobCellsAndProofsV1<E>>>>, Error> {
+        let cell_index_bitarray_hex = format!("0x{}", hex::encode(cell_index_bitarray));
+
+        debug!(
+            num_versioned_hashes = versioned_hashes.len(),
+            cell_index_bitarray = %cell_index_bitarray_hex,
+            "Calling engine_getBlobsV4"
+        );
+
+        let params = json!([versioned_hashes, cell_index_bitarray_hex]);
 
         self.rpc_request(
             ENGINE_GET_BLOBS_V4,
