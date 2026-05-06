@@ -1199,18 +1199,18 @@ impl HttpJsonRpc {
         payload_attributes: Option<PayloadAttributes>,
         custody_columns: Option<[u8; 16]>,
     ) -> Result<ForkchoiceUpdatedResponse, Error> {
-        let custody = custody_columns.unwrap_or([0u8; 16]);
-        let state_value: serde_json::Value = serde_json::to_value(JsonForkchoiceStateV4 {
-            head_block_hash: forkchoice_state.head_block_hash,
-            safe_block_hash: forkchoice_state.safe_block_hash,
-            finalized_block_hash: forkchoice_state.finalized_block_hash,
-            custody_columns: custody,
-        })
-        .map_err(Error::Json)?;
+        let state_value = serde_json::to_value(JsonForkchoiceStateV1::from(forkchoice_state))
+            .map_err(Error::Json)?;
+
+        let custody_value = custody_columns
+            .map(|bytes| serde_json::to_value(format!("0x{}", hex::encode(bytes))))
+            .transpose()
+            .map_err(Error::Json)?;
 
         let params = json!([
             state_value,
-            payload_attributes.map(JsonPayloadAttributes::from)
+            payload_attributes.map(JsonPayloadAttributes::from),
+            custody_value,
         ]);
 
         let response: JsonForkchoiceUpdatedV1Response = self

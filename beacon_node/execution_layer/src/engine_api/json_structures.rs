@@ -951,17 +951,6 @@ impl From<JsonForkchoiceStateV1> for ForkchoiceState {
     }
 }
 
-/// Forkchoice state for `engine_forkchoiceUpdatedV4`, which includes custody columns.
-#[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct JsonForkchoiceStateV4 {
-    pub head_block_hash: ExecutionBlockHash,
-    pub safe_block_hash: ExecutionBlockHash,
-    pub finalized_block_hash: ExecutionBlockHash,
-    #[serde(with = "serde_bytes_16_hex")]
-    pub custody_columns: [u8; 16],
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, EnumString)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 #[strum(serialize_all = "SCREAMING_SNAKE_CASE")]
@@ -1141,36 +1130,6 @@ pub mod serde_logs_bloom {
 
         FixedVector::new(vec)
             .map_err(|e| serde::de::Error::custom(format!("invalid logs bloom: {:?}", e)))
-    }
-}
-
-/// Serializes and deserializes `[u8; 16]` as a hex string (e.g., `"0x0011..."`).
-pub mod serde_bytes_16_hex {
-    use super::*;
-    use serde::{Deserializer, Serializer};
-    use serde_utils::hex::PrefixedHexVisitor;
-
-    pub fn serialize<S>(bytes: &[u8; 16], serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        serializer.serialize_str(&format!("0x{}", hex::encode(bytes)))
-    }
-
-    pub fn deserialize<'de, D>(deserializer: D) -> Result<[u8; 16], D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let vec = deserializer.deserialize_string(PrefixedHexVisitor)?;
-        if vec.len() != 16 {
-            return Err(serde::de::Error::custom(format!(
-                "expected 16 bytes, got {}",
-                vec.len()
-            )));
-        }
-        let mut arr = [0u8; 16];
-        arr.copy_from_slice(&vec);
-        Ok(arr)
     }
 }
 

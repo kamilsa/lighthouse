@@ -550,17 +550,8 @@ pub async fn handle_rpc<E: EthSpec>(
         | ENGINE_FORKCHOICE_UPDATED_V2
         | ENGINE_FORKCHOICE_UPDATED_V3
         | ENGINE_FORKCHOICE_UPDATED_V4 => {
-            let forkchoice_state: JsonForkchoiceStateV1 = if method == ENGINE_FORKCHOICE_UPDATED_V4 {
-                let v4_state: JsonForkchoiceStateV4 =
-                    get_param(params, 0).map_err(|s| (s, BAD_PARAMS_ERROR_CODE))?;
-                JsonForkchoiceStateV1 {
-                    head_block_hash: v4_state.head_block_hash,
-                    safe_block_hash: v4_state.safe_block_hash,
-                    finalized_block_hash: v4_state.finalized_block_hash,
-                }
-            } else {
-                get_param(params, 0).map_err(|s| (s, BAD_PARAMS_ERROR_CODE))?
-            };
+            let forkchoice_state: JsonForkchoiceStateV1 =
+                get_param(params, 0).map_err(|s| (s, BAD_PARAMS_ERROR_CODE))?;
             let payload_attributes = match method {
                 ENGINE_FORKCHOICE_UPDATED_V1 => {
                     let jpa1: Option<JsonPayloadAttributesV1> =
