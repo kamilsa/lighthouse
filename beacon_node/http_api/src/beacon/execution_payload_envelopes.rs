@@ -7,7 +7,9 @@ use crate::version::{
     execution_optimistic_finalized_beacon_response,
 };
 use beacon_chain::data_column_verification::{GossipDataColumnError, GossipVerifiedDataColumn};
+use beacon_chain::payload_column_utils::{build_payload_column_sidecars, payload_column_data};
 use beacon_chain::payload_envelope_verification::EnvelopeError;
+use beacon_chain::payload_envelope_verification::gossip_verified_envelope::GossipVerifiedEnvelope;
 use beacon_chain::{
     AvailabilityProcessingStatus, BeaconChain, BeaconChainTypes, NotifyExecutionLayer,
 };
@@ -20,7 +22,10 @@ use std::future::Future;
 use std::sync::Arc;
 use tokio::sync::mpsc::UnboundedSender;
 use tracing::{debug, error, info, warn};
-use types::{BlockImportSource, EthSpec, SignedExecutionPayloadEnvelope};
+use types::{
+    BlockImportSource, EthSpec, PayloadColumnSidecar, PayloadColumnSubnetId,
+    SignedExecutionPayloadEnvelope,
+};
 use warp::{
     Filter, Rejection, Reply,
     hyper::{Body, Response},
@@ -138,18 +143,21 @@ pub async fn publish_execution_payload_envelope<T: BeaconChainTypes>(
             ))
         })?;
 
+    // [New in EIP-8142] The envelope itself is never gossiped. Instead we publish the payload
+    // columns the builder committed to in its bid, from which peers reconstruct the payload.
+    let payload_columns =
+        build_payload_columns_for_publication(&chain, &gossip_verified, slot).await?;
+
     let network_tx_clone = network_tx.clone();
-    let envelope_for_gossip = gossip_verified.signed_envelope.as_ref().clone();
-    let publish_fn = || {
-        crate::utils::publish_pubsub_message(
-            &network_tx_clone,
-            PubsubMessage::ExecutionPayload(Box::new(envelope_for_gossip)),
-        )
-        .map_err(|_| {
-            EnvelopeError::BeaconChainError(Box::new(
-                beacon_chain::BeaconChainError::UnableToPublish,
-            ))
-        })
+    let publish_fn = move || {
+        for message in payload_columns_to_pubsub_messages(payload_columns.clone()) {
+            crate::utils::publish_pubsub_message(&network_tx_clone, message).map_err(|_| {
+                EnvelopeError::BeaconChainError(Box::new(
+                    beacon_chain::BeaconChainError::UnableToPublish,
+                ))
+            })?;
+        }
+        Ok(())
     };
 
     let import_result = chain
@@ -229,6 +237,104 @@ pub async fn publish_execution_payload_envelope<T: BeaconChainTypes>(
     }
 
     Ok(warp::reply().into_response())
+}
+
+/// Returns the payload columns to publish for this envelope.
+///
+/// Locally-built payloads have their columns cached during block production, so the expensive cell
+/// computation is not repeated here. An externally-built envelope arrives with no cache entry, so
+/// its columns are derived from the posted envelope.
+///
+/// Either way the columns are checked against the `payload_columns_root` in the block's signed bid:
+/// publishing columns that do not match would have every peer reject them.
+async fn build_payload_columns_for_publication<T: BeaconChainTypes>(
+    chain: &Arc<BeaconChain<T>>,
+    gossip_verified: &GossipVerifiedEnvelope<T>,
+    slot: types::Slot,
+) -> Result<Vec<PayloadColumnSidecar<T::EthSpec>>, Rejection> {
+    let envelope = &gossip_verified.signed_envelope.message;
+    let beacon_block_root = envelope.beacon_block_root;
+
+    let expected_root = gossip_verified
+        .block
+        .message()
+        .body()
+        .signed_execution_payload_bid()
+        .map_err(|e| {
+            warp_utils::reject::custom_bad_request(format!("block has no execution bid: {e:?}"))
+        })?
+        .message
+        .payload_columns_root;
+
+    let cached = chain
+        .pending_payload_envelopes
+        .write()
+        .take_payload_columns(slot);
+
+    let columns = match cached {
+        Some(columns) => columns,
+        None => {
+            // No cache entry means an external builder produced this payload, so the columns have
+            // to be derived here. Cell computation is CPU-bound, so keep it off the async runtime.
+            let data = payload_column_data(&envelope.payload, &envelope.execution_requests);
+            let chain_for_build = chain.clone();
+            let handle = chain
+                .task_executor
+                .spawn_blocking_handle(
+                    move || {
+                        build_payload_column_sidecars(
+                            &data,
+                            beacon_block_root,
+                            slot,
+                            &chain_for_build.kzg,
+                        )
+                    },
+                    "build_payload_columns_for_publication",
+                )
+                .ok_or_else(|| {
+                    warp_utils::reject::custom_server_error("runtime shutdown".to_string())
+                })?;
+
+            let (columns, _) = handle
+                .await
+                .map_err(|_| warp_utils::reject::custom_server_error("join error".to_string()))?
+                .map_err(|e| {
+                    error!(%slot, error = ?e, "Failed to build payload columns for envelope");
+                    warp_utils::reject::custom_server_error(format!(
+                        "failed to build payload columns: {e:?}"
+                    ))
+                })?;
+            columns
+        }
+    };
+
+    // A mismatch means the envelope does not correspond to the committed payload; publishing would
+    // be pointless and importing it locally would diverge from the rest of the network.
+    if let Some(column) = columns.first()
+        && !column.verify_inclusion_proof(expected_root)
+    {
+        return Err(warp_utils::reject::custom_bad_request(format!(
+            "payload columns do not match the bid's payload_columns_root for block \
+             {beacon_block_root}"
+        )));
+    }
+
+    Ok(columns)
+}
+
+/// Wraps each column in the pubsub message for its subnet.
+fn payload_columns_to_pubsub_messages<E: EthSpec>(
+    columns: Vec<PayloadColumnSidecar<E>>,
+) -> Vec<PubsubMessage<E>> {
+    columns
+        .into_iter()
+        .map(|column| {
+            PubsubMessage::PayloadColumnSidecar(Box::new((
+                PayloadColumnSubnetId::from_column_index(column.index),
+                Arc::new(column),
+            )))
+        })
+        .collect()
 }
 
 fn spawn_build_gloas_data_columns_task<T: BeaconChainTypes>(

@@ -11,6 +11,8 @@ use beacon_chain::data_column_verification::{
     PartialColumnVerificationResult,
 };
 use beacon_chain::payload_bid_verification::PayloadBidError;
+use beacon_chain::payload_column_utils::recover_payload_columns;
+use beacon_chain::payload_column_verification::GossipPayloadColumnError;
 use beacon_chain::payload_envelope_verification::{
     EnvelopeError, gossip_verified_envelope::GossipVerifiedEnvelope,
 };
@@ -39,6 +41,7 @@ use logging::crit;
 use operation_pool::ReceivedPreCapella;
 use slot_clock::SlotClock;
 use ssz::Encode;
+use std::collections::HashSet;
 use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
@@ -50,11 +53,11 @@ use types::{
     Attestation, AttestationData, AttestationRef, AttesterSlashing, ColumnIndex, DataColumnSidecar,
     DataColumnSubnetId, EthSpec, Hash256, IndexedAttestation, LightClientFinalityUpdate,
     LightClientOptimisticUpdate, PartialDataColumn, PartialDataColumnHeader,
-    PayloadAttestationMessage, ProposerSlashing, SignedAggregateAndProof, SignedBeaconBlock,
-    SignedBlsToExecutionChange, SignedContributionAndProof, SignedExecutionPayloadBid,
-    SignedExecutionPayloadEnvelope, SignedProposerPreferences, SignedVoluntaryExit,
-    SingleAttestation, Slot, SubnetId, SyncCommitteeMessage, SyncSubnetId,
-    block::BlockImportSource,
+    PayloadAttestationMessage, PayloadColumnSidecar, PayloadColumnSubnetId, ProposerSlashing,
+    SignedAggregateAndProof, SignedBeaconBlock, SignedBlsToExecutionChange,
+    SignedContributionAndProof, SignedExecutionPayloadBid, SignedExecutionPayloadEnvelope,
+    SignedProposerPreferences, SignedVoluntaryExit, SingleAttestation, Slot, SubnetId,
+    SyncCommitteeMessage, SyncSubnetId, block::BlockImportSource,
 };
 
 use beacon_processor::work_reprocessing_queue::QueuedColumnReconstruction;
@@ -3938,6 +3941,265 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
                     %peer_id,
                     error = ?e,
                     "Execution payload envelope processing failed"
+                );
+            }
+        }
+    }
+
+    /// Process a payload column sidecar received on `payload_column_sidecar_{subnet_id}`.
+    ///
+    /// [New in EIP-8142] These columns carry the erasure-coded execution payload that used to be
+    /// gossiped whole on the `execution_payload` topic. Once half of them have arrived, the payload
+    /// is recovered locally and fed into the existing envelope pipeline.
+    #[instrument(
+        name = "lh_process_payload_column_sidecar",
+        parent = None,
+        level = "debug",
+        skip_all,
+        fields(
+            beacon_block_root = %column_sidecar.beacon_block_root,
+            index = column_sidecar.index,
+        ),
+    )]
+    pub async fn process_gossip_payload_column_sidecar(
+        self: Arc<Self>,
+        message_id: MessageId,
+        peer_id: PeerId,
+        subnet_id: PayloadColumnSubnetId,
+        column_sidecar: Arc<PayloadColumnSidecar<T::EthSpec>>,
+        seen_timestamp: Duration,
+    ) {
+        let block_root = column_sidecar.beacon_block_root;
+        let index = column_sidecar.index;
+        let slot = column_sidecar.slot;
+
+        let delay = get_slot_delay_ms(seen_timestamp, slot, &self.chain.slot_clock);
+
+        match self
+            .chain
+            .verify_payload_column_for_gossip(column_sidecar.clone(), subnet_id)
+        {
+            Ok(verified) => {
+                metrics::set_gauge(
+                    &metrics::BEACON_PAYLOAD_COLUMN_DELAY_GOSSIP,
+                    delay.as_millis() as i64,
+                );
+                self.propagate_validation_result(message_id, peer_id, MessageAcceptance::Accept);
+
+                self.try_recover_payload_from_columns(peer_id, block_root, verified.columns_held)
+                    .await;
+            }
+            Err(GossipPayloadColumnError::PriorKnown { .. }) => {
+                // A duplicate is expected on gossip; do not re-propagate it.
+                self.propagate_validation_result(message_id, peer_id, MessageAcceptance::Ignore);
+            }
+            Err(GossipPayloadColumnError::AlreadyReconstructed { .. }) => {
+                self.propagate_validation_result(message_id, peer_id, MessageAcceptance::Ignore);
+            }
+            Err(GossipPayloadColumnError::UnknownBeaconBlock(_)) => {
+                // The column may simply have outrun its block. Defer it rather than dropping it —
+                // the commitment lives in the block's bid, so it cannot be checked until then.
+                debug!(
+                    %block_root,
+                    %slot,
+                    index,
+                    "Payload column references unknown block, deferring to reprocess queue"
+                );
+
+                self.propagate_validation_result(
+                    message_id.clone(),
+                    peer_id,
+                    MessageAcceptance::Ignore,
+                );
+
+                // Re-verify inline rather than re-entering this function: a self-referential
+                // future would not be `Sync`, which the reprocess queue requires.
+                let inner_self = self.clone();
+                let process_fn = Box::pin(async move {
+                    match inner_self
+                        .chain
+                        .verify_payload_column_for_gossip(column_sidecar, subnet_id)
+                    {
+                        Ok(verified) => {
+                            inner_self.propagate_validation_result(
+                                message_id,
+                                peer_id,
+                                MessageAcceptance::Accept,
+                            );
+                            inner_self
+                                .try_recover_payload_from_columns(
+                                    peer_id,
+                                    block_root,
+                                    verified.columns_held,
+                                )
+                                .await;
+                        }
+                        Err(e) => {
+                            debug!(
+                                %block_root,
+                                index,
+                                error = ?e,
+                                "Deferred payload column failed verification"
+                            );
+                        }
+                    }
+                });
+
+                if self
+                    .beacon_processor_send
+                    .try_send(WorkEvent {
+                        drop_during_sync: false,
+                        work: Work::Reprocess(ReprocessQueueMessage::UnknownBlockForEnvelope(
+                            QueuedGossipEnvelope {
+                                beacon_block_slot: slot,
+                                beacon_block_root: block_root,
+                                process_fn,
+                            },
+                        )),
+                    })
+                    .is_err()
+                {
+                    error!(
+                        %slot,
+                        %block_root,
+                        index,
+                        "Failed to defer payload column import"
+                    );
+                }
+            }
+            Err(e) => {
+                debug!(
+                    %block_root,
+                    index,
+                    error = ?e,
+                    "Rejected gossip payload column"
+                );
+                if e.penalize_peer() {
+                    self.propagate_validation_result(
+                        message_id,
+                        peer_id,
+                        MessageAcceptance::Reject,
+                    );
+                    self.gossip_penalize_peer(
+                        peer_id,
+                        PeerAction::LowToleranceError,
+                        "gossip_payload_column_low",
+                    );
+                } else {
+                    self.propagate_validation_result(
+                        message_id,
+                        peer_id,
+                        MessageAcceptance::Ignore,
+                    );
+                }
+            }
+        }
+    }
+
+    /// If enough payload columns have arrived for `block_root`, recover the execution payload,
+    /// import the resulting envelope and re-seed the columns we never received.
+    async fn try_recover_payload_from_columns(
+        self: &Arc<Self>,
+        peer_id: PeerId,
+        block_root: Hash256,
+        columns_held: usize,
+    ) {
+        let Some(columns) = self
+            .chain
+            .payload_column_assembler
+            .take_columns_for_recovery(block_root)
+        else {
+            return;
+        };
+
+        debug!(
+            %block_root,
+            columns_held,
+            "Recovering execution payload from payload columns"
+        );
+
+        let received_indices = columns
+            .iter()
+            .map(|sidecar| sidecar.index)
+            .collect::<HashSet<_>>();
+
+        // Recovery, the SSZ decode of the payload and the block load are all CPU or IO bound, so
+        // they run together on the blocking pool rather than on the async runtime.
+        let chain = self.chain.clone();
+        let recovery = self.chain.task_executor.spawn_blocking_handle(
+            move || {
+                let recovered = recover_payload_columns(&columns, &chain.kzg)
+                    .map_err(|e| format!("recovery failed: {e:?}"))?;
+                let envelope = chain
+                    .reconstruct_envelope_from_payload_columns(block_root, &recovered)
+                    .map_err(|e| format!("envelope reconstruction failed: {e:?}"))?;
+                Ok::<_, String>((recovered, envelope))
+            },
+            "recover_payload_columns",
+        );
+
+        let (recovered, envelope) = match recovery {
+            Some(handle) => match handle.await {
+                Ok(Ok(result)) => result,
+                Ok(Err(e)) => {
+                    error!(%block_root, error = e, "Failed to recover payload from columns");
+                    // Allow another attempt once more columns arrive.
+                    self.chain
+                        .payload_column_assembler
+                        .clear_reconstructed(block_root);
+                    return;
+                }
+                Err(e) => {
+                    error!(%block_root, error = ?e, "Payload column recovery task failed");
+                    self.chain
+                        .payload_column_assembler
+                        .clear_reconstructed(block_root);
+                    return;
+                }
+            },
+            None => return,
+        };
+
+        // Re-seed the columns we did not receive, so peers missing them can make progress.
+        let to_publish = recovered
+            .iter()
+            .filter(|sidecar| !received_indices.contains(&sidecar.index))
+            .map(|sidecar| {
+                PubsubMessage::PayloadColumnSidecar(Box::new((
+                    PayloadColumnSubnetId::from_column_index(sidecar.index),
+                    Arc::new(sidecar.clone()),
+                )))
+            })
+            .collect::<Vec<_>>();
+
+        if !to_publish.is_empty() {
+            debug!(
+                %block_root,
+                count = to_publish.len(),
+                "Publishing reconstructed payload columns"
+            );
+            self.send_network_message(NetworkMessage::Publish {
+                messages: to_publish,
+            });
+        }
+
+        match self
+            .chain
+            .verify_envelope_for_gossip(Arc::new(envelope))
+            .await
+        {
+            Ok(verified) => {
+                self.clone()
+                    .process_gossip_verified_execution_payload_envelope(peer_id, verified)
+                    .await;
+            }
+            Err(e) => {
+                // The columns verified against the bid's commitment, so a failure here is about
+                // the block/envelope relationship, not the sending peer.
+                debug!(
+                    %block_root,
+                    error = ?e,
+                    "Reconstructed envelope failed gossip verification"
                 );
             }
         }

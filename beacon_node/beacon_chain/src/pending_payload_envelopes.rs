@@ -6,11 +6,14 @@
 //! and publishes the payload.
 
 use std::collections::HashMap;
-use types::{BlobsList, EthSpec, ExecutionPayloadEnvelope, Slot};
+use types::{BlobsList, EthSpec, ExecutionPayloadEnvelope, PayloadColumnSidecar, Slot};
 
 pub struct PendingEnvelopeData<E: EthSpec> {
     pub envelope: ExecutionPayloadEnvelope<E>,
     pub blobs: Option<BlobsList<E>>,
+    /// [New in EIP-8142] The erasure-coded payload, built during block production and published in
+    /// place of the envelope itself.
+    pub payload_columns: Option<Vec<PayloadColumnSidecar<E>>>,
 }
 
 /// Cache for pending execution payload envelopes awaiting publishing.
@@ -56,6 +59,15 @@ impl<E: EthSpec> PendingPayloadEnvelopes<E> {
     /// Remove and return the blobs and proofs for a slot, leaving the envelope in place.
     pub fn take_blobs(&mut self, slot: Slot) -> Option<BlobsList<E>> {
         self.envelopes.get_mut(&slot).and_then(|d| d.blobs.take())
+    }
+
+    /// Remove and return the payload columns for a slot, leaving the envelope in place.
+    ///
+    /// Consume-once, like [`Self::take_blobs`]: the columns are published exactly once.
+    pub fn take_payload_columns(&mut self, slot: Slot) -> Option<Vec<PayloadColumnSidecar<E>>> {
+        self.envelopes
+            .get_mut(&slot)
+            .and_then(|d| d.payload_columns.take())
     }
 
     /// Remove and return a pending envelope by slot.
@@ -108,6 +120,7 @@ mod tests {
                 parent_beacon_block_root: Hash256::ZERO,
             },
             blobs: None,
+            payload_columns: None,
         }
     }
 
@@ -153,6 +166,7 @@ mod tests {
         let data = PendingEnvelopeData {
             envelope: make_envelope(slot).envelope,
             blobs: Some(blobs),
+            payload_columns: None,
         };
         cache.insert(slot, data);
 
@@ -167,6 +181,36 @@ mod tests {
         // Envelope is still in the cache
         assert!(cache.contains(slot));
         assert!(cache.get(slot).is_some());
+    }
+
+    #[test]
+    fn take_payload_columns_returns_once() {
+        let mut cache = PendingPayloadEnvelopes::<E>::default();
+        let slot = Slot::new(1);
+
+        let data = PendingEnvelopeData {
+            envelope: make_envelope(slot).envelope,
+            blobs: None,
+            payload_columns: Some(vec![]),
+        };
+        cache.insert(slot, data);
+
+        // The columns are published exactly once, so a second take must not repeat them.
+        assert!(cache.take_payload_columns(slot).is_some());
+        assert!(cache.take_payload_columns(slot).is_none());
+
+        // Envelope is still in the cache.
+        assert!(cache.get(slot).is_some());
+    }
+
+    #[test]
+    fn take_payload_columns_returns_none_when_absent() {
+        let mut cache = PendingPayloadEnvelopes::<E>::default();
+        let slot = Slot::new(1);
+
+        cache.insert(slot, make_envelope(slot));
+        assert!(cache.take_payload_columns(slot).is_none());
+        assert!(cache.take_payload_columns(Slot::new(99)).is_none());
     }
 
     #[test]

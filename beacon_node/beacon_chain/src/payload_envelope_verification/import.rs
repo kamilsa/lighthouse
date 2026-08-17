@@ -389,11 +389,17 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
         let state_root = block.state_root();
         let snapshot = load_snapshot_from_state_root::<T>(block_root, state_root, &self.store)?;
 
-        // Verify envelope signature and state processing
+        // [Modified in EIP-8142] Envelope signatures are no longer meaningful: the payload is
+        // propagated as Merkle-committed payload columns, so envelopes reconstructed from them
+        // carry an infinity signature and there is nothing to verify.
+        //
+        // The payload is still bound to the block: `verify_execution_payload_envelope` checks the
+        // envelope's `block_hash` against the one committed to in the signed bid, and the execution
+        // layer rejects, via `newPayload`, any payload whose contents do not hash to it.
         verify_execution_payload_envelope(
             &snapshot.pre_state,
             &signed_envelope,
-            VerifySignatures::True,
+            VerifySignatures::False,
             snapshot.state_root,
             &self.spec,
         )?;

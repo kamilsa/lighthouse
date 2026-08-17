@@ -317,4 +317,29 @@ impl Kzg {
         let kzg_proofs = proofs.map(KzgProof);
         Ok((cells, kzg_proofs))
     }
+
+    /// Recovers the full set of cells from a subset, without computing KZG proofs.
+    ///
+    /// Used for EIP-8142 payload columns, which are Merkle-committed rather than KZG-committed, so
+    /// the proofs would be discarded. Recovering the polynomial is an FFT, but computing the
+    /// proofs is a multi-scalar multiplication that dominates the cost of the whole operation.
+    ///
+    /// TODO(EIP-8142): `rust_eth_kzg` 0.9 exposes no proof-free recovery — `ProverContext`'s fields
+    /// and `recovery::recover_polynomial_coeff` are all crate-private — so for now we compute the
+    /// proofs and throw them away. Upstream a `DASContext::recover_cells` that feeds the recovered
+    /// coefficients straight to `Prover::extend_polynomial` (which already accepts
+    /// `ProverInput::PolyCoeff`) and call it from here. Results are identical either way; this is
+    /// purely a performance fix.
+    pub fn recover_cells(
+        &self,
+        cell_ids: &[u64],
+        cells: &[CellRef<'_>],
+    ) -> Result<[Cell; CELLS_PER_EXT_BLOB], Error> {
+        let (cells, _proofs) = self
+            .context()
+            .recover_cells_and_kzg_proofs(cell_ids.to_vec(), cells.to_vec())
+            .map_err(Error::Kzg)?;
+
+        Ok(cells)
+    }
 }

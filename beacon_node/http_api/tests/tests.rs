@@ -3074,6 +3074,7 @@ impl ApiTester {
             execution_payment: 0,
             blob_kzg_commitments: Default::default(),
             execution_requests_root: Hash256::zero(),
+            payload_columns_root: Hash256::zero(),
         };
 
         let signed = SignedExecutionPayloadBid {

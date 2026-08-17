@@ -7,16 +7,14 @@ use store::DatabaseBlock;
 use tracing::debug;
 use types::{
     ChainSpec, EthSpec, ExecutionPayloadBid, ExecutionPayloadEnvelope, Hash256, SignedBeaconBlock,
-    SignedExecutionPayloadEnvelope, Slot, consts::gloas::BUILDER_INDEX_SELF_BUILD,
+    SignedExecutionPayloadEnvelope, Slot,
 };
 
 use crate::{
     BeaconChain, BeaconChainError, BeaconChainTypes, BeaconStore, ServerSentEventHandler,
-    beacon_proposer_cache::{self, BeaconProposerCache},
+    beacon_proposer_cache::BeaconProposerCache,
     canonical_head::CanonicalHead,
-    payload_envelope_verification::{
-        EnvelopeError, EnvelopeProcessingSnapshot, load_snapshot_from_state_root,
-    },
+    payload_envelope_verification::{EnvelopeError, EnvelopeProcessingSnapshot},
     validator_pubkey_cache::ValidatorPubkeyCache,
 };
 
@@ -105,7 +103,7 @@ impl<T: BeaconChainTypes> GossipVerifiedEnvelope<T> {
         //
         // Presently these two cases are conflated.
         let fork_choice_read_lock = ctx.canonical_head.fork_choice_read_lock();
-        let Some(proto_block) = fork_choice_read_lock.get_block(&beacon_block_root) else {
+        let Some(_proto_block) = fork_choice_read_lock.get_block(&beacon_block_root) else {
             return Err(EnvelopeError::BlockRootUnknown {
                 block_root: beacon_block_root,
             });
@@ -138,82 +136,19 @@ impl<T: BeaconChainTypes> GossipVerifiedEnvelope<T> {
 
         verify_envelope_consistency(envelope, &block, execution_bid, latest_finalized_slot)?;
 
-        // Verify the envelope signature.
+        // [Modified in EIP-8142] The envelope signature is no longer checked.
         //
-        // For self-built envelopes, we can use the proposer cache for the fork and the
-        // validator pubkey cache for the proposer's pubkey, avoiding a state load from disk.
-        // For external builder envelopes, we must load the state to access the builder registry.
+        // The payload no longer travels as a single signed gossip message: it is erasure-coded into
+        // payload columns whose only authentication is `payload_columns_root` in the builder's
+        // signed bid. Envelopes reconstructed from those columns therefore carry an infinity
+        // signature, and there is nothing meaningful left to verify here. The envelope is instead
+        // bound to its block by `verify_envelope_consistency` above (slot, builder index and
+        // execution block hash all matching the signed bid), and — for envelopes that arrive over
+        // RPC rather than being reconstructed locally — by re-deriving `payload_columns_root`.
+        //
+        // The state snapshot is left unset; the execution-pending stage loads it on demand.
         let builder_index = envelope.builder_index;
-        let block_slot = envelope.slot();
-        let envelope_epoch = block_slot.epoch(T::EthSpec::slots_per_epoch());
-        // Since the payload's block is already guaranteed to be imported, the associated `proto_block.current_epoch_shuffling_id`
-        // already carries the correct `shuffling_decision_block`.
-        let proposer_shuffling_decision_block = proto_block
-            .current_epoch_shuffling_id
-            .shuffling_decision_block;
-
-        let (signature_is_valid, opt_snapshot) = if builder_index == BUILDER_INDEX_SELF_BUILD {
-            // Fast path: self-built envelopes can be verified without loading the state.
-            let mut opt_snapshot = None;
-            let proposer = beacon_proposer_cache::with_proposer_cache(
-                ctx.beacon_proposer_cache,
-                proposer_shuffling_decision_block,
-                envelope_epoch,
-                |proposers| proposers.get_slot::<T::EthSpec>(block_slot),
-                || {
-                    debug!(
-                        %beacon_block_root,
-                        "Proposer shuffling cache miss for envelope verification"
-                    );
-                    let snapshot = load_snapshot_from_state_root::<T>(
-                        beacon_block_root,
-                        proto_block.state_root,
-                        ctx.store,
-                    )?;
-                    opt_snapshot = Some(Box::new(snapshot.clone()));
-                    Ok::<_, EnvelopeError>((snapshot.state_root, snapshot.pre_state))
-                },
-                ctx.spec,
-            )?;
-            let expected_proposer = proposer.index;
-            let fork = proposer.fork;
-
-            if block.message().proposer_index() != expected_proposer as u64 {
-                return Err(EnvelopeError::IncorrectBlockProposer {
-                    proposer_index: block.message().proposer_index(),
-                    local_shuffling: expected_proposer as u64,
-                });
-            }
-
-            let pubkey_cache = ctx.validator_pubkey_cache.read();
-            let pubkey = pubkey_cache
-                .get(block.message().proposer_index() as usize)
-                .ok_or_else(|| EnvelopeError::UnknownValidator {
-                    proposer_index: block.message().proposer_index(),
-                })?;
-            let is_valid = signed_envelope.verify_signature(
-                pubkey,
-                &fork,
-                ctx.genesis_validators_root,
-                ctx.spec,
-            );
-            (is_valid, opt_snapshot)
-        } else {
-            // TODO(gloas) if we implement a builder pubkey cache, we'll need to use it here.
-            // External builder: must load the state to get the builder pubkey.
-            let snapshot = load_snapshot_from_state_root::<T>(
-                beacon_block_root,
-                proto_block.state_root,
-                ctx.store,
-            )?;
-            let is_valid =
-                signed_envelope.verify_signature_with_state(&snapshot.pre_state, ctx.spec)?;
-            (is_valid, Some(Box::new(snapshot)))
-        };
-
-        if !signature_is_valid {
-            return Err(EnvelopeError::BadSignature);
-        }
+        let opt_snapshot = None;
 
         if let Some(event_handler) = ctx.event_handler.as_ref()
             && event_handler.has_execution_payload_gossip_subscribers()

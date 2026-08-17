@@ -434,21 +434,23 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
         })
     }
 
-    /// Create a new `Work` event for some execution payload envelope.
-    pub fn send_gossip_execution_payload(
+    /// Create a new `Work` event for some payload column sidecar.
+    pub fn send_gossip_payload_column_sidecar(
         self: &Arc<Self>,
         message_id: MessageId,
         peer_id: PeerId,
-        execution_payload: Box<SignedExecutionPayloadEnvelope<T::EthSpec>>,
+        subnet_id: PayloadColumnSubnetId,
+        column_sidecar: Arc<PayloadColumnSidecar<T::EthSpec>>,
         seen_timestamp: Duration,
     ) -> Result<(), Error<T::EthSpec>> {
         let processor = self.clone();
         let process_fn = async move {
             processor
-                .process_gossip_execution_payload_envelope(
+                .process_gossip_payload_column_sidecar(
                     message_id,
                     peer_id,
-                    Arc::new(*execution_payload),
+                    subnet_id,
+                    column_sidecar,
                     seen_timestamp,
                 )
                 .await
@@ -456,7 +458,7 @@ impl<T: BeaconChainTypes> NetworkBeaconProcessor<T> {
 
         self.try_send(BeaconWorkEvent {
             drop_during_sync: false,
-            work: Work::GossipExecutionPayload(Box::pin(process_fn)),
+            work: Work::GossipPayloadColumnSidecar(Box::pin(process_fn)),
         })
     }
 

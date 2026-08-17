@@ -12,6 +12,7 @@ use crate::kzg_utils::{build_data_column_sidecars_fulu, build_data_column_sideca
 use crate::light_client_server_cache::LightClientServerCache;
 use crate::migrate::{BackgroundMigrator, MigratorConfig};
 use crate::observed_data_sidecars::ObservedDataSidecars;
+use crate::payload_column_assembler::PayloadColumnAssembler;
 use crate::pending_payload_cache::PendingPayloadCache;
 use crate::persisted_beacon_chain::PersistedBeaconChain;
 use crate::persisted_custody::load_custody_context;
@@ -49,6 +50,10 @@ use types::{
     BeaconState, BlobSidecarList, ChainSpec, ColumnIndex, DataColumnSidecarList, EthSpec, Hash256,
     SignedBeaconBlock, Slot,
 };
+
+/// How many blocks' worth of payload columns to keep while waiting for enough to recover the
+/// execution payload. Matches the data availability checker's LRU capacity.
+const PAYLOAD_COLUMN_LRU_CAPACITY: usize = 32;
 
 /// An empty struct used to "witness" all the `BeaconChainTypes` traits. It has no user-facing
 /// functionality and only exists to satisfy the type system.
@@ -1000,6 +1005,7 @@ where
             observed_column_sidecars: RwLock::new(ObservedDataSidecars::new(self.spec.clone())),
             observed_slashable: <_>::default(),
             pending_payload_envelopes: <_>::default(),
+            payload_column_assembler: PayloadColumnAssembler::new(PAYLOAD_COLUMN_LRU_CAPACITY),
             observed_voluntary_exits: <_>::default(),
             observed_proposer_slashings: <_>::default(),
             observed_attester_slashings: <_>::default(),

@@ -10,14 +10,14 @@ use types::{
     AttesterSlashing, AttesterSlashingBase, AttesterSlashingElectra, CellBitmap, DataColumnSidecar,
     DataColumnSubnetId, EthSpec, ForkContext, ForkName, Hash256, LightClientFinalityUpdate,
     LightClientOptimisticUpdate, PartialDataColumn, PartialDataColumnHeader,
-    PartialDataColumnSidecar, PayloadAttestationMessage, ProposerSlashing, SignedAggregateAndProof,
-    SignedAggregateAndProofBase, SignedAggregateAndProofElectra, SignedBeaconBlock,
-    SignedBeaconBlockAltair, SignedBeaconBlockBase, SignedBeaconBlockBellatrix,
-    SignedBeaconBlockCapella, SignedBeaconBlockDeneb, SignedBeaconBlockElectra,
-    SignedBeaconBlockFulu, SignedBeaconBlockGloas, SignedBlsToExecutionChange,
-    SignedContributionAndProof, SignedExecutionPayloadBid, SignedExecutionPayloadEnvelope,
-    SignedProposerPreferences, SignedVoluntaryExit, SingleAttestation, SubnetId,
-    SyncCommitteeMessage, SyncSubnetId,
+    PartialDataColumnSidecar, PayloadAttestationMessage, PayloadColumnSidecar,
+    PayloadColumnSubnetId, ProposerSlashing, SignedAggregateAndProof, SignedAggregateAndProofBase,
+    SignedAggregateAndProofElectra, SignedBeaconBlock, SignedBeaconBlockAltair,
+    SignedBeaconBlockBase, SignedBeaconBlockBellatrix, SignedBeaconBlockCapella,
+    SignedBeaconBlockDeneb, SignedBeaconBlockElectra, SignedBeaconBlockFulu,
+    SignedBeaconBlockGloas, SignedBlsToExecutionChange, SignedContributionAndProof,
+    SignedExecutionPayloadBid, SignedProposerPreferences, SignedVoluntaryExit, SingleAttestation,
+    SubnetId, SyncCommitteeMessage, SyncSubnetId,
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -42,8 +42,9 @@ pub enum PubsubMessage<E: EthSpec> {
     SyncCommitteeMessage(Box<(SyncSubnetId, SyncCommitteeMessage)>),
     /// Gossipsub message for BLS to execution change messages.
     BlsToExecutionChange(Box<SignedBlsToExecutionChange>),
-    /// Gossipsub message providing notification of a signed execution payload envelope.
-    ExecutionPayload(Box<SignedExecutionPayloadEnvelope<E>>),
+    /// Gossipsub message providing notification of a [`PayloadColumnSidecar`] along with the subnet
+    /// id where it was received.
+    PayloadColumnSidecar(Box<(PayloadColumnSubnetId, Arc<PayloadColumnSidecar<E>>)>),
     /// Gossipsub message providing notification of a payload attestation message.
     PayloadAttestation(Box<PayloadAttestationMessage>),
     /// Gossipsub message providing notification of a signed execution payload bid.
@@ -165,7 +166,9 @@ impl<E: EthSpec> PubsubMessage<E> {
             PubsubMessage::SignedContributionAndProof(_) => GossipKind::SignedContributionAndProof,
             PubsubMessage::SyncCommitteeMessage(data) => GossipKind::SyncCommitteeMessage(data.0),
             PubsubMessage::BlsToExecutionChange(_) => GossipKind::BlsToExecutionChange,
-            PubsubMessage::ExecutionPayload(_) => GossipKind::ExecutionPayload,
+            PubsubMessage::PayloadColumnSidecar(column_sidecar_data) => {
+                GossipKind::PayloadColumnSidecar(column_sidecar_data.0)
+            }
             PubsubMessage::PayloadAttestation(_) => GossipKind::PayloadAttestation,
             PubsubMessage::ExecutionPayloadBid(_) => GossipKind::ExecutionPayloadBid,
             PubsubMessage::ProposerPreferences(_) => GossipKind::ProposerPreferences,
@@ -353,13 +356,23 @@ impl<E: EthSpec> PubsubMessage<E> {
                             bls_to_execution_change,
                         )))
                     }
-                    GossipKind::ExecutionPayload => {
-                        let execution_payload_envelope =
-                            SignedExecutionPayloadEnvelope::from_ssz_bytes(data)
-                                .map_err(|e| format!("{:?}", e))?;
-                        Ok(PubsubMessage::ExecutionPayload(Box::new(
-                            execution_payload_envelope,
-                        )))
+                    GossipKind::PayloadColumnSidecar(subnet_id) => {
+                        match fork_context.get_fork_from_context_bytes(gossip_topic.fork_digest) {
+                            Some(fork) if fork.gloas_enabled() => {
+                                let column_sidecar = Arc::new(
+                                    PayloadColumnSidecar::from_ssz_bytes(data)
+                                        .map_err(|e| format!("{:?}", e))?,
+                                );
+                                Ok(PubsubMessage::PayloadColumnSidecar(Box::new((
+                                    *subnet_id,
+                                    column_sidecar,
+                                ))))
+                            }
+                            Some(_) | None => Err(format!(
+                                "payload_column_sidecar topic invalid for given fork digest {:?}",
+                                gossip_topic.fork_digest
+                            )),
+                        }
                     }
                     GossipKind::ExecutionPayloadBid => {
                         let execution_payload_bid = SignedExecutionPayloadBid::from_ssz_bytes(data)
@@ -443,7 +456,7 @@ impl<E: EthSpec> PubsubMessage<E> {
             PubsubMessage::SignedContributionAndProof(data) => data.as_ssz_bytes(),
             PubsubMessage::SyncCommitteeMessage(data) => data.1.as_ssz_bytes(),
             PubsubMessage::BlsToExecutionChange(data) => data.as_ssz_bytes(),
-            PubsubMessage::ExecutionPayload(data) => data.as_ssz_bytes(),
+            PubsubMessage::PayloadColumnSidecar(data) => data.1.as_ssz_bytes(),
             PubsubMessage::PayloadAttestation(data) => data.as_ssz_bytes(),
             PubsubMessage::ExecutionPayloadBid(data) => data.as_ssz_bytes(),
             PubsubMessage::ProposerPreferences(data) => data.as_ssz_bytes(),
@@ -525,14 +538,11 @@ impl<E: EthSpec> std::fmt::Display for PubsubMessage<E> {
                     data.message.validator_index, data.message.to_execution_address
                 )
             }
-            PubsubMessage::ExecutionPayload(data) => {
-                write!(
-                    f,
-                    "Signed Execution Payload Envelope: slot: {:?}, beacon block root: {:?}",
-                    data.slot(),
-                    data.beacon_block_root()
-                )
-            }
+            PubsubMessage::PayloadColumnSidecar(data) => write!(
+                f,
+                "PayloadColumnSidecar: slot: {}, column index: {}, beacon block root: {:?}",
+                data.1.slot, data.1.index, data.1.beacon_block_root,
+            ),
             PubsubMessage::PayloadAttestation(data) => {
                 write!(
                     f,

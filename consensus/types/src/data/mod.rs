@@ -3,6 +3,8 @@ mod data_column_custody_group;
 mod data_column_sidecar;
 mod data_column_subnet_id;
 mod partial_data_column_sidecar;
+mod payload_column_sidecar;
+mod payload_column_subnet_id;
 
 pub use blob_sidecar::{
     BlobIdentifier, BlobSidecar, BlobSidecarError, BlobSidecarList, BlobsList, FixedBlobSidecarList,
@@ -22,6 +24,11 @@ pub use partial_data_column_sidecar::{
     CellBitmap, PartialDataColumn, PartialDataColumnHeader, PartialDataColumnPartsMetadata,
     PartialDataColumnSidecar, PartialDataColumnSidecarError, PartialDataColumnSidecarRef,
 };
+pub use payload_column_sidecar::{
+    PayloadColumn, PayloadColumnSidecar, PayloadColumnSidecarList,
+    PayloadColumnsInclusionProofDepth,
+};
+pub use payload_column_subnet_id::{PayloadColumnSubnetId, all_payload_column_sidecar_subnets};
 
 use crate::core::EthSpec;
 use ssz_types::FixedVector;

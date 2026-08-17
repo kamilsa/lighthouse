@@ -17,6 +17,7 @@ use std::time::Duration;
 use tracing::{debug, warn};
 use types::{
     ChainSpec, DataColumnSubnetId, EnrForkId, EthSpec, ForkContext, SubnetId, SyncSubnetId,
+    all_payload_column_sidecar_subnets,
 };
 
 pub const NETWORK_KEY_FILENAME: &str = "key";
@@ -263,7 +264,7 @@ pub fn load_or_build_metadata<E: EthSpec>(
 
 /// Creates a whitelist topic filter that covers all possible topics using the given set of
 /// possible fork digests.
-pub(crate) fn create_whitelist_filter(
+pub(crate) fn create_whitelist_filter<E: EthSpec>(
     possible_fork_digests: Vec<[u8; 4]>,
     spec: &ChainSpec,
     sync_committee_subnet_count: u64,
@@ -284,7 +285,6 @@ pub(crate) fn create_whitelist_filter(
         add(AttesterSlashing);
         add(SignedContributionAndProof);
         add(BlsToExecutionChange);
-        add(ExecutionPayload);
         add(ExecutionPayloadBid);
         add(PayloadAttestation);
         add(ProposerPreferences);
@@ -298,6 +298,9 @@ pub(crate) fn create_whitelist_filter(
         }
         for id in 0..spec.data_column_sidecar_subnet_count {
             add(DataColumnSidecar(DataColumnSubnetId::new(id)));
+        }
+        for subnet in all_payload_column_sidecar_subnets::<E>() {
+            add(PayloadColumnSidecar(subnet));
         }
     }
     gossipsub::WhitelistSubscriptionFilter(possible_hashes)

@@ -38,8 +38,8 @@ pub struct GossipCache {
     sync_committee_message: Option<Duration>,
     /// Timeout for signed BLS to execution changes.
     bls_to_execution_change: Option<Duration>,
-    /// Timeout for signed execution payload envelope.
-    execution_payload: Option<Duration>,
+    /// Timeout for payload column sidecars.
+    payload_column_sidecar: Option<Duration>,
     /// Timeout for execution payload bid.
     execution_payload_bid: Option<Duration>,
     /// Timeout for payload attestation message.
@@ -75,8 +75,8 @@ pub struct GossipCacheBuilder {
     sync_committee_message: Option<Duration>,
     /// Timeout for signed BLS to execution changes.
     bls_to_execution_change: Option<Duration>,
-    /// Timeout for signed execution payload envelope.
-    execution_payload: Option<Duration>,
+    /// Timeout for payload column sidecars.
+    payload_column_sidecar: Option<Duration>,
     /// Timeout for execution payload bid.
     execution_payload_bid: Option<Duration>,
     /// Timeout for payload attestation message.
@@ -151,9 +151,9 @@ impl GossipCacheBuilder {
         self
     }
 
-    /// Timeout for signed execution payload envelope.
-    pub fn execution_payload_timeout(mut self, timeout: Duration) -> Self {
-        self.execution_payload = Some(timeout);
+    /// Timeout for payload column sidecars.
+    pub fn payload_column_sidecar_timeout(mut self, timeout: Duration) -> Self {
+        self.payload_column_sidecar = Some(timeout);
         self
     }
 
@@ -200,7 +200,7 @@ impl GossipCacheBuilder {
             signed_contribution_and_proof,
             sync_committee_message,
             bls_to_execution_change,
-            execution_payload,
+            payload_column_sidecar,
             execution_payload_bid,
             payload_attestation,
             proposer_preferences,
@@ -220,7 +220,7 @@ impl GossipCacheBuilder {
             signed_contribution_and_proof: signed_contribution_and_proof.or(default_timeout),
             sync_committee_message: sync_committee_message.or(default_timeout),
             bls_to_execution_change: bls_to_execution_change.or(default_timeout),
-            execution_payload: execution_payload.or(default_timeout),
+            payload_column_sidecar: payload_column_sidecar.or(default_timeout),
             execution_payload_bid: execution_payload_bid.or(default_timeout),
             payload_attestation: payload_attestation.or(default_timeout),
             proposer_preferences: proposer_preferences.or(default_timeout),
@@ -250,7 +250,7 @@ impl GossipCache {
             GossipKind::SignedContributionAndProof => self.signed_contribution_and_proof,
             GossipKind::SyncCommitteeMessage(_) => self.sync_committee_message,
             GossipKind::BlsToExecutionChange => self.bls_to_execution_change,
-            GossipKind::ExecutionPayload => self.execution_payload,
+            GossipKind::PayloadColumnSidecar(_) => self.payload_column_sidecar,
             GossipKind::ExecutionPayloadBid => self.execution_payload_bid,
             GossipKind::PayloadAttestation => self.payload_attestation,
             GossipKind::ProposerPreferences => self.proposer_preferences,

@@ -446,7 +446,7 @@ pub enum Work<E: EthSpec> {
     DataColumnsByRootsRequest(BlockingFn),
     DataColumnsByRangeRequest(BlockingFn),
     GossipBlsToExecutionChange(BlockingFn),
-    GossipExecutionPayload(AsyncFn),
+    GossipPayloadColumnSidecar(AsyncFn),
     GossipExecutionPayloadBid(BlockingFn),
     GossipPayloadAttestation(BlockingFn),
     GossipProposerPreferences(BlockingFn),
@@ -508,7 +508,7 @@ pub enum WorkType {
     DataColumnsByRootsRequest,
     DataColumnsByRangeRequest,
     GossipBlsToExecutionChange,
-    GossipExecutionPayload,
+    GossipPayloadColumnSidecar,
     GossipExecutionPayloadBid,
     GossipPayloadAttestation,
     GossipProposerPreferences,
@@ -548,7 +548,7 @@ impl<E: EthSpec> Work<E> {
                 WorkType::GossipLightClientOptimisticUpdate
             }
             Work::GossipBlsToExecutionChange(_) => WorkType::GossipBlsToExecutionChange,
-            Work::GossipExecutionPayload(_) => WorkType::GossipExecutionPayload,
+            Work::GossipPayloadColumnSidecar(_) => WorkType::GossipPayloadColumnSidecar,
             Work::GossipExecutionPayloadBid(_) => WorkType::GossipExecutionPayloadBid,
             Work::GossipPayloadAttestation(_) => WorkType::GossipPayloadAttestation,
             Work::GossipProposerPreferences(_) => WorkType::GossipProposerPreferences,
@@ -846,8 +846,7 @@ impl<E: EthSpec> BeaconProcessor<E> {
                         // required to verify some attestations.
                         } else if let Some(item) = work_queues.gossip_block_queue.pop() {
                             Some(item)
-                        } else if let Some(item) = work_queues.gossip_execution_payload_queue.pop()
-                        {
+                        } else if let Some(item) = work_queues.gossip_payload_column_queue.pop() {
                             Some(item)
                         } else if let Some(item) = work_queues.gossip_data_column_queue.pop() {
                             Some(item)
@@ -1261,9 +1260,9 @@ impl<E: EthSpec> BeaconProcessor<E> {
                             Work::GossipBlsToExecutionChange { .. } => work_queues
                                 .gossip_bls_to_execution_change_queue
                                 .push(work, work_id),
-                            Work::GossipExecutionPayload { .. } => work_queues
-                                .gossip_execution_payload_queue
-                                .push(work, work_id),
+                            Work::GossipPayloadColumnSidecar { .. } => {
+                                work_queues.gossip_payload_column_queue.push(work, work_id)
+                            }
                             Work::GossipExecutionPayloadBid { .. } => work_queues
                                 .gossip_execution_payload_bid_queue
                                 .push(work, work_id),
@@ -1373,8 +1372,8 @@ impl<E: EthSpec> BeaconProcessor<E> {
                         WorkType::GossipBlsToExecutionChange => {
                             work_queues.gossip_bls_to_execution_change_queue.len()
                         }
-                        WorkType::GossipExecutionPayload => {
-                            work_queues.gossip_execution_payload_queue.len()
+                        WorkType::GossipPayloadColumnSidecar => {
+                            work_queues.gossip_payload_column_queue.len()
                         }
                         WorkType::GossipExecutionPayloadBid => {
                             work_queues.gossip_execution_payload_bid_queue.len()
@@ -1550,7 +1549,7 @@ impl<E: EthSpec> BeaconProcessor<E> {
             Work::GossipBlock(work)
             | Work::GossipDataColumnSidecar(work)
             | Work::GossipPartialDataColumnSidecar(work)
-            | Work::GossipExecutionPayload(work) => task_spawner.spawn_async(async move {
+            | Work::GossipPayloadColumnSidecar(work) => task_spawner.spawn_async(async move {
                 work.await;
             }),
             Work::BlobsByRangeRequest(process_fn)

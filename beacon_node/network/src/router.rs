@@ -526,15 +526,22 @@ impl<T: BeaconChainTypes> Router<T> {
                             bls_to_execution_change,
                         ),
                 ),
-            PubsubMessage::ExecutionPayload(signed_execution_payload_envelope) => {
-                trace!(%peer_id, "Received a signed execution payload envelope");
+            PubsubMessage::PayloadColumnSidecar(payload_column_sidecar) => {
+                let (subnet_id, column_sidecar) = *payload_column_sidecar;
+                trace!(
+                    %peer_id,
+                    index = column_sidecar.index,
+                    "Received a payload column sidecar"
+                );
                 self.handle_beacon_processor_send_result(
-                    self.network_beacon_processor.send_gossip_execution_payload(
-                        message_id,
-                        peer_id,
-                        signed_execution_payload_envelope,
-                        seen_timestamp,
-                    ),
+                    self.network_beacon_processor
+                        .send_gossip_payload_column_sidecar(
+                            message_id,
+                            peer_id,
+                            subnet_id,
+                            column_sidecar,
+                            seen_timestamp,
+                        ),
                 )
             }
             PubsubMessage::PayloadAttestation(payload_attestation_message) => {

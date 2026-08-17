@@ -223,6 +223,7 @@ pub enum BeaconChainError {
     ProposerHeadForkChoiceError(fork_choice::Error<proto_array::Error>),
     UnableToPublish,
     UnableToBuildColumnSidecar(String),
+    UnableToBuildPayloadColumnSidecar(String),
     AvailabilityCheckError(AvailabilityCheckError),
     LightClientError(LightClientError),
     LightClientBootstrapError(String),

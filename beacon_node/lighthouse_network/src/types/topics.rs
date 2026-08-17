@@ -6,7 +6,10 @@ use typenum::Unsigned;
 use types::{
     ChainSpec, EthSpec,
     attestation::SubnetId,
-    data::{DataColumnSubnetId, all_data_column_sidecar_subnets_from_spec},
+    data::{
+        DataColumnSubnetId, PayloadColumnSubnetId, all_data_column_sidecar_subnets_from_spec,
+        all_payload_column_sidecar_subnets,
+    },
     fork::ForkName,
     sync_committee::SyncSubnetId,
 };
@@ -22,13 +25,13 @@ pub const BEACON_BLOCK_TOPIC: &str = "beacon_block";
 pub const BEACON_AGGREGATE_AND_PROOF_TOPIC: &str = "beacon_aggregate_and_proof";
 pub const BEACON_ATTESTATION_PREFIX: &str = "beacon_attestation_";
 pub const DATA_COLUMN_SIDECAR_PREFIX: &str = "data_column_sidecar_";
+pub const PAYLOAD_COLUMN_SIDECAR_PREFIX: &str = "payload_column_sidecar_";
 pub const VOLUNTARY_EXIT_TOPIC: &str = "voluntary_exit";
 pub const PROPOSER_SLASHING_TOPIC: &str = "proposer_slashing";
 pub const ATTESTER_SLASHING_TOPIC: &str = "attester_slashing";
 pub const SIGNED_CONTRIBUTION_AND_PROOF_TOPIC: &str = "sync_committee_contribution_and_proof";
 pub const SYNC_COMMITTEE_PREFIX_TOPIC: &str = "sync_committee_";
 pub const BLS_TO_EXECUTION_CHANGE_TOPIC: &str = "bls_to_execution_change";
-pub const EXECUTION_PAYLOAD: &str = "execution_payload";
 pub const EXECUTION_PAYLOAD_BID: &str = "execution_payload_bid";
 pub const PAYLOAD_ATTESTATION: &str = "payload_attestation_message";
 pub const PROPOSER_PREFERENCES: &str = "proposer_preferences";
@@ -88,7 +91,12 @@ pub fn core_topics_to_subscribe<E: EthSpec>(
     }
 
     if fork_name.gloas_enabled() {
-        topics.push(GossipKind::ExecutionPayload);
+        // EIP-8142: the execution payload is propagated as erasure-coded payload columns rather
+        // than as a single `execution_payload` message. Every node subscribes to every payload
+        // column subnet, since any node may need to reconstruct the payload.
+        for subnet in all_payload_column_sidecar_subnets::<E>() {
+            topics.push(GossipKind::PayloadColumnSidecar(subnet));
+        }
         topics.push(GossipKind::ExecutionPayloadBid);
         topics.push(GossipKind::PayloadAttestation);
         topics.push(GossipKind::ProposerPreferences);
@@ -116,7 +124,7 @@ pub fn is_fork_non_core_topic(topic: &GossipTopic, _fork_name: ForkName) -> bool
         | GossipKind::AttesterSlashing
         | GossipKind::SignedContributionAndProof
         | GossipKind::BlsToExecutionChange
-        | GossipKind::ExecutionPayload
+        | GossipKind::PayloadColumnSidecar(_)
         | GossipKind::ExecutionPayloadBid
         | GossipKind::PayloadAttestation
         | GossipKind::ProposerPreferences
@@ -175,8 +183,9 @@ pub enum GossipKind {
     SyncCommitteeMessage(SyncSubnetId),
     /// Topic for validator messages which change their withdrawal address.
     BlsToExecutionChange,
-    /// Topic for signed execution payload envelopes.
-    ExecutionPayload,
+    /// Topic for publishing `PayloadColumnSidecar`s on a particular subnet.
+    #[strum(serialize = "payload_column_sidecar")]
+    PayloadColumnSidecar(PayloadColumnSubnetId),
     /// Topic for payload attestation messages.
     PayloadAttestation,
     /// Topic for signed execution payload bids.
@@ -193,6 +202,9 @@ impl GossipKind {
     pub fn use_partial_messages(&self, config: &NetworkConfig) -> bool {
         match self {
             GossipKind::DataColumnSidecar(_) => config.enable_partial_columns,
+            // TODO(EIP-8142): payload columns are gossiped whole for now. Supporting partial
+            // payload columns needs per-cell Merkle multiproofs on `PayloadColumnSidecar` so that a
+            // subset of cells is independently verifiable.
             _ => false,
         }
     }
@@ -207,6 +219,9 @@ impl std::fmt::Display for GossipKind {
             }
             GossipKind::DataColumnSidecar(column_subnet_id) => {
                 write!(f, "{}{}", DATA_COLUMN_SIDECAR_PREFIX, **column_subnet_id)
+            }
+            GossipKind::PayloadColumnSidecar(column_subnet_id) => {
+                write!(f, "{}{}", PAYLOAD_COLUMN_SIDECAR_PREFIX, **column_subnet_id)
             }
             x => f.write_str(x.as_ref()),
         }
@@ -273,7 +288,6 @@ impl GossipTopic {
                 PROPOSER_SLASHING_TOPIC => GossipKind::ProposerSlashing,
                 ATTESTER_SLASHING_TOPIC => GossipKind::AttesterSlashing,
                 BLS_TO_EXECUTION_CHANGE_TOPIC => GossipKind::BlsToExecutionChange,
-                EXECUTION_PAYLOAD => GossipKind::ExecutionPayload,
                 EXECUTION_PAYLOAD_BID => GossipKind::ExecutionPayloadBid,
                 PAYLOAD_ATTESTATION => GossipKind::PayloadAttestation,
                 PROPOSER_PREFERENCES => GossipKind::ProposerPreferences,
@@ -339,7 +353,9 @@ impl std::fmt::Display for GossipTopic {
                 format!("{}{}", DATA_COLUMN_SIDECAR_PREFIX, *column_subnet_id)
             }
             GossipKind::BlsToExecutionChange => BLS_TO_EXECUTION_CHANGE_TOPIC.into(),
-            GossipKind::ExecutionPayload => EXECUTION_PAYLOAD.into(),
+            GossipKind::PayloadColumnSidecar(column_subnet_id) => {
+                format!("{}{}", PAYLOAD_COLUMN_SIDECAR_PREFIX, *column_subnet_id)
+            }
             GossipKind::PayloadAttestation => PAYLOAD_ATTESTATION.into(),
             GossipKind::ExecutionPayloadBid => EXECUTION_PAYLOAD_BID.into(),
             GossipKind::ProposerPreferences => PROPOSER_PREFERENCES.into(),
@@ -384,6 +400,12 @@ fn subnet_topic_index(topic: &str) -> Option<GossipKind> {
         return Some(GossipKind::SyncCommitteeMessage(SyncSubnetId::new(
             index.parse::<u64>().ok()?,
         )));
+    } else if let Some(index) = topic.strip_prefix(PAYLOAD_COLUMN_SIDECAR_PREFIX) {
+        // Checked before `DATA_COLUMN_SIDECAR_PREFIX` would be ambiguous; the two prefixes are
+        // distinct, but keeping this arm first makes the precedence explicit.
+        return Some(GossipKind::PayloadColumnSidecar(
+            PayloadColumnSubnetId::new(index.parse::<u64>().ok()?),
+        ));
     } else if let Some(index) = topic.strip_prefix(DATA_COLUMN_SIDECAR_PREFIX) {
         return Some(GossipKind::DataColumnSidecar(DataColumnSubnetId::new(
             index.parse::<u64>().ok()?,
@@ -566,6 +588,74 @@ mod tests {
             core_topics_to_subscribe::<E>(ForkName::Fulu, &topic_config, &spec)
                 .contains(&GossipKind::DataColumnSidecar(0.into()))
         );
+    }
+
+    #[test]
+    fn payload_column_topics_replace_execution_payload_at_gloas() {
+        let spec = get_spec();
+        let s = get_sampling_subnets();
+        let topic_config = get_topic_config(&s);
+        let topics = core_topics_to_subscribe::<E>(ForkName::Gloas, &topic_config, &spec);
+
+        // Every payload column subnet is subscribed, regardless of custody.
+        for subnet in all_payload_column_sidecar_subnets::<E>() {
+            assert!(
+                topics.contains(&GossipKind::PayloadColumnSidecar(subnet)),
+                "should subscribe to payload column subnet {subnet}"
+            );
+        }
+        assert_eq!(
+            topics
+                .iter()
+                .filter(|kind| matches!(kind, GossipKind::PayloadColumnSidecar(_)))
+                .count(),
+            E::number_of_columns(),
+        );
+
+        // The pre-Gloas fork does not subscribe to them.
+        let fulu_topics = core_topics_to_subscribe::<E>(ForkName::Fulu, &topic_config, &spec);
+        assert!(
+            !fulu_topics
+                .iter()
+                .any(|kind| matches!(kind, GossipKind::PayloadColumnSidecar(_))),
+        );
+    }
+
+    #[test]
+    fn payload_column_topic_round_trips() {
+        let fork_digest = [1, 2, 3, 4];
+        for index in [0u64, 1, 42, 127] {
+            let kind = GossipKind::PayloadColumnSidecar(PayloadColumnSubnetId::new(index));
+            let topic = GossipTopic::new(kind.clone(), GossipEncoding::SSZSnappy, fork_digest);
+            let encoded: String = topic.into();
+            assert_eq!(
+                encoded,
+                format!("/eth2/01020304/payload_column_sidecar_{index}/ssz_snappy")
+            );
+            assert_eq!(
+                GossipTopic::decode(&encoded).expect("should decode").kind(),
+                &kind
+            );
+        }
+    }
+
+    #[test]
+    fn payload_column_topic_is_not_a_discovery_subnet() {
+        // Every node subscribes to every payload column subnet, so there is nothing to advertise or
+        // discover — unlike data columns, which are custody-dependent.
+        let topic = GossipTopic::new(
+            GossipKind::PayloadColumnSidecar(PayloadColumnSubnetId::new(3)),
+            GossipEncoding::SSZSnappy,
+            [1, 2, 3, 4],
+        );
+        assert!(topic.subnet_id().is_none());
+    }
+
+    #[test]
+    fn execution_payload_topic_is_gone() {
+        assert!(GossipTopic::decode("/eth2/01020304/execution_payload/ssz_snappy").is_err());
+        // The bid topic keeps its own, distinct name.
+        assert!(GossipTopic::decode("/eth2/01020304/execution_payload_bid/ssz_snappy").is_ok());
     }
 
     #[test]

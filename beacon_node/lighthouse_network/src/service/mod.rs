@@ -327,14 +327,15 @@ impl<E: EthSpec> Network<E> {
 
             let possible_fork_digests = ctx.fork_context.all_fork_digests();
             let filter = gossipsub::MaxCountSubscriptionFilter {
-                filter: utils::create_whitelist_filter(
+                filter: utils::create_whitelist_filter::<E>(
                     possible_fork_digests,
                     &ctx.chain_spec,
                     SYNC_COMMITTEE_SUBNET_COUNT,
                 ),
                 // during a fork we subscribe to both the old and new topics
                 max_subscribed_topics: max_topics_at_any_fork * 4,
-                // 424 in theory = (64 attestation + 4 sync committee + 7 core topics + 9 blob topics + 128 column topics) * 2
+                // Derived from the fork with the most topics, so it already accounts for the 128
+                // payload column topics Gloas adds on top of the 128 data column topics.
                 max_subscriptions_per_request: max_topics_at_any_fork * 2,
             };
 

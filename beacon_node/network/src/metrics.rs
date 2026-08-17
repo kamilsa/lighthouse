@@ -566,6 +566,16 @@ pub static ENVELOPE_DELAY_GOSSIP: LazyLock<Result<IntGauge>> = LazyLock::new(|| 
 });
 
 /*
+ * Payload Column Delay Metrics
+ */
+pub static BEACON_PAYLOAD_COLUMN_DELAY_GOSSIP: LazyLock<Result<IntGauge>> = LazyLock::new(|| {
+    try_create_int_gauge(
+        "payload_column_delay_gossip",
+        "The first time we see this payload column from gossip as a delay from the start of the slot",
+    )
+});
+
+/*
  * Block Delay Metrics
  */
 pub static BEACON_BLOCK_DELAY_GOSSIP: LazyLock<Result<IntGauge>> = LazyLock::new(|| {

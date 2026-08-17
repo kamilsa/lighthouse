@@ -32,11 +32,13 @@ use types::{
     BeaconBlock, BeaconBlockBodyGloas, BeaconBlockGloas, BeaconState, BeaconStateError,
     BuilderIndex, ChainSpec, Deposit, Eth1Data, EthSpec, ExecutionBlockHash, ExecutionPayloadBid,
     ExecutionPayloadEnvelope, ExecutionPayloadGloas, ExecutionRequests, FullPayload, Graffiti,
-    Hash256, PayloadAttestation, ProposerSlashing, RelativeEpoch, SignedBeaconBlock,
-    SignedBlsToExecutionChange, SignedExecutionPayloadBid, SignedExecutionPayloadEnvelope,
-    SignedVoluntaryExit, Slot, SyncAggregate, Withdrawal, Withdrawals,
+    Hash256, PayloadAttestation, PayloadColumnSidecar, ProposerSlashing, RelativeEpoch,
+    SignedBeaconBlock, SignedBlsToExecutionChange, SignedExecutionPayloadBid,
+    SignedExecutionPayloadEnvelope, SignedVoluntaryExit, Slot, SyncAggregate, Withdrawal,
+    Withdrawals,
 };
 
+use crate::payload_column_utils::{build_payload_column_sidecars, payload_column_data};
 use crate::pending_payload_envelopes::PendingEnvelopeData;
 use crate::{
     BeaconChain, BeaconChainError, BeaconChainTypes, BlockProductionError,
@@ -78,6 +80,13 @@ pub struct ExecutionPayloadData<E: types::EthSpec> {
     pub builder_index: BuilderIndex,
     pub slot: Slot,
     pub blobs_and_proofs: (types::BlobsList<E>, types::KzgProofs<E>),
+    /// [New in EIP-8142] The erasure-coded payload, committed to by the bid's
+    /// `payload_columns_root`.
+    ///
+    /// Built alongside the bid so the expensive cell computation happens once. The
+    /// `beacon_block_root` on each sidecar is only stamped in once the block exists — it is not
+    /// part of the Merkle commitment, so filling it in later does not invalidate the proofs.
+    pub payload_columns: Vec<PayloadColumnSidecar<E>>,
 }
 
 /// The result of a local payload build, used to decide whether to include a builder bid
@@ -684,11 +693,20 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
             // TODO(gloas) might be safer to cache by root instead of by slot.
             // We should revisit this once this code path + beacon api spec matures
             let (blobs, _) = payload_data.blobs_and_proofs;
+
+            // Stamp the now-known block root into the columns built alongside the bid. The root is
+            // not covered by `payload_columns_root`, so the inclusion proofs remain valid.
+            let mut payload_columns = payload_data.payload_columns;
+            for column in payload_columns.iter_mut() {
+                column.beacon_block_root = beacon_block_root;
+            }
+
             self.pending_payload_envelopes.write().insert(
                 envelope_slot,
                 PendingEnvelopeData {
                     envelope: signed_envelope.message,
                     blobs: Some(blobs),
+                    payload_columns: Some(payload_columns),
                 },
             );
 
@@ -809,6 +827,13 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
             should_override_builder,
         } = block_proposal_contents;
 
+        // [New in EIP-8142] Erasure-code the payload and commit to the resulting columns in the
+        // bid. The columns are kept so that publishing does not have to recompute them.
+        let (payload_columns, payload_columns_root) = self
+            .clone()
+            .build_payload_columns(&payload, &execution_requests, produce_at_slot)
+            .await?;
+
         // TODO(gloas) since we are defaulting to local building, execution payment is 0
         // execution payment should only be set to > 0 for trusted building.
         let bid = ExecutionPayloadBid::<T::EthSpec> {
@@ -824,6 +849,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
             execution_payment: EXECUTION_PAYMENT_TRUSTLESS_BUILD,
             blob_kzg_commitments,
             execution_requests_root: execution_requests.tree_hash_root(),
+            payload_columns_root,
         };
 
         // Store payload data for envelope construction after block is created
@@ -833,6 +859,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
             builder_index,
             slot: produce_at_slot,
             blobs_and_proofs,
+            payload_columns,
         };
 
         Ok((
@@ -847,6 +874,44 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
                 should_override_builder,
             },
         ))
+    }
+
+    /// [New in EIP-8142] Erasure-codes the execution payload into payload columns and returns them
+    /// along with the `payload_columns_root` the bid must commit to.
+    ///
+    /// The `beacon_block_root` on the returned sidecars is left zeroed; the block that carries this
+    /// bid does not exist yet. It is stamped in when the envelope is cached, and is not part of the
+    /// Merkle commitment, so the inclusion proofs stay valid.
+    ///
+    /// Cell computation is CPU-bound, so it runs on the blocking pool.
+    async fn build_payload_columns(
+        self: Arc<Self>,
+        payload: &ExecutionPayloadGloas<T::EthSpec>,
+        execution_requests: &ExecutionRequests<T::EthSpec>,
+        slot: Slot,
+    ) -> Result<(Vec<PayloadColumnSidecar<T::EthSpec>>, Hash256), BlockProductionError> {
+        let data = payload_column_data(payload, execution_requests);
+        let chain = self.clone();
+
+        self.task_executor
+            .clone()
+            .spawn_blocking_handle(
+                move || {
+                    build_payload_column_sidecars(&data, Hash256::ZERO, slot, &chain.kzg).map_err(
+                        |e| {
+                            BlockProductionError::BeaconChain(Box::new(
+                                BeaconChainError::UnableToBuildPayloadColumnSidecar(format!(
+                                    "{e:?}"
+                                )),
+                            ))
+                        },
+                    )
+                },
+                "build_payload_columns",
+            )
+            .ok_or(BlockProductionError::ShuttingDown)?
+            .await
+            .map_err(BlockProductionError::TokioJoin)?
     }
 
     /// Look up the highest gossip-verified bid for the `(slot, parent_block_hash,
@@ -1311,6 +1376,7 @@ mod tests {
                 builder_index: BUILDER_INDEX_SELF_BUILD,
                 slot: Slot::new(0),
                 blobs_and_proofs: (VariableList::empty(), VariableList::empty()),
+                payload_columns: vec![],
             },
             payload_value: gwei(payload_gwei),
             should_override_builder,

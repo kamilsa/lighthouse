@@ -34,6 +34,11 @@ pub struct ExecutionPayloadBid<E: EthSpec> {
     pub execution_payment: u64,
     pub blob_kzg_commitments: KzgCommitments<E>,
     pub execution_requests_root: Hash256,
+    /// [New in EIP-8142] Merkle root over the payload column roots.
+    ///
+    /// The builder commits to the erasure-coded execution payload here, which is what authenticates
+    /// the payload column sidecars gossiped on `payload_column_sidecar_{subnet_id}`.
+    pub payload_columns_root: Hash256,
 }
 
 impl<E: EthSpec> SignedRoot for ExecutionPayloadBid<E> {}

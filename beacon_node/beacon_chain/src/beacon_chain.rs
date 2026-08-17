@@ -62,6 +62,7 @@ use crate::observed_slashable::ObservedSlashable;
 use crate::partial_data_column_assembler::PartialMergeResult;
 use crate::payload_attestation_verification::VerifiedPayloadAttestationMessage;
 use crate::payload_bid_verification::payload_bid_cache::GossipVerifiedPayloadBidCache;
+use crate::payload_column_assembler::PayloadColumnAssembler;
 #[cfg(not(test))]
 use crate::payload_envelope_streamer::{EnvelopeRequestSource, launch_payload_envelope_stream};
 use crate::pending_payload_cache::PendingPayloadCache;
@@ -437,6 +438,8 @@ pub struct BeaconChain<T: BeaconChainTypes> {
     /// Cache of pending execution payload envelopes for local block building.
     /// Envelopes are stored here during block production and eventually published.
     pub pending_payload_envelopes: RwLock<PendingPayloadEnvelopes<T::EthSpec>>,
+    /// Collects EIP-8142 payload column sidecars until the execution payload can be recovered.
+    pub payload_column_assembler: PayloadColumnAssembler<T::EthSpec>,
     /// Maintains a record of which validators have submitted voluntary exits.
     pub observed_voluntary_exits: Mutex<ObservedOperations<SignedVoluntaryExit, T::EthSpec>>,
     /// Maintains a record of which validators we've seen proposer slashings for.

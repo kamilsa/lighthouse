@@ -795,6 +795,8 @@ async fn availability_cache_maintenance_service<T: BeaconChainTypes>(
                 if let Some(assembler) = &partial_assembler {
                     assembler.do_maintenance(cutoff_epoch);
                 }
+                // [New in EIP-8142] Drop payload columns for blocks that can no longer be imported.
+                chain.payload_column_assembler.do_maintenance(cutoff_epoch);
             }
             None => {
                 error!("Failed to read slot clock");
